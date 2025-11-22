@@ -1,0 +1,5 @@
+.env
+portfolio.csv
+__pycache__/
+*.py[cod]
+.venv/

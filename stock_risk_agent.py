@@ -13,7 +13,6 @@ from datetime import datetime
 class StockRiskAgent:
     def __init__(self):
         """Initialize the Stock Risk Agent"""
-        self.setup_telegram()
         self.setup_ai()
         self.portfolio_file = 'portfolio.csv'
 
@@ -22,21 +21,6 @@ class StockRiskAgent:
         self.output_price_per_mt = 15.00
 
         cprint("🛡️ Stock Risk Agent Initialized", "white", "on_blue")
-
-    def setup_telegram(self):
-        """Initialize Telegram Bot"""
-        try:
-            self.bot_token = config.TELEGRAM_BOT_TOKEN
-            self.chat_id = config.TELEGRAM_CHAT_ID
-            if not self.bot_token or not self.chat_id:
-                cprint("⚠️ Telegram credentials missing in .env", "yellow")
-                self.bot = None
-            else:
-                self.bot = Bot(token=self.bot_token)
-                cprint("📱 Telegram Bot Configured", "green")
-        except Exception as e:
-            cprint(f"❌ Telegram Setup Error: {e}", "red")
-            self.bot = None
 
     def setup_ai(self):
         """Initialize Anthropic Client"""
@@ -57,7 +41,12 @@ class StockRiskAgent:
 
             # Get news
             news = stock.news[:3] if stock.news else []
-            news_summary = [n['title'] for n in news]
+            news_summary = []
+            for n in news:
+                if isinstance(n, dict):
+                    title = n.get('title', n.get('headline', 'No title'))
+                    news_summary.append(title)
+
 
             # Get key info
             info = stock.info
@@ -134,7 +123,10 @@ class StockRiskAgent:
 
     def send_report(self, report, cost):
         """Send report via Telegram"""
-        if not self.bot:
+        bot_token = config.TELEGRAM_BOT_TOKEN
+        chat_id = config.TELEGRAM_CHAT_ID
+
+        if not bot_token or not chat_id:
             cprint("⚠️ Telegram not configured, printing report:", "yellow")
             print(report)
             print(f"\n💰 Cost: ${cost:.4f}")
@@ -144,18 +136,38 @@ class StockRiskAgent:
         footer = f"\n\n🕒 {timestamp}\n💰 AI Cost: ${cost:.4f}"
         full_message = report + footer
 
-        try:
-            # Telegram has a message limit, split if needed (simple split)
-            if len(full_message) > 4000:
-                parts = [full_message[i:i+4000] for i in range(0, len(full_message), 4000)]
-                for part in parts:
-                    asyncio.run(self.bot.send_message(chat_id=self.chat_id, text=part, parse_mode='Markdown'))
-            else:
-                asyncio.run(self.bot.send_message(chat_id=self.chat_id, text=full_message, parse_mode='Markdown'))
+        async def _send(content):
+            bot = Bot(token=bot_token)
+            try:
+                # Split message intelligently
+                max_length = 4000
+                parts = []
+                while content:
+                    if len(content) <= max_length:
+                        parts.append(content)
+                        break
 
-            cprint("✅ Telegram Report Sent!", "green")
+                    # Find a safe split point
+                    split_idx = content.rfind('\n\n', 0, max_length)
+                    if split_idx == -1:
+                        split_idx = content.rfind('\n', 0, max_length)
+                    if split_idx == -1:
+                        split_idx = max_length
+
+                    parts.append(content[:split_idx])
+                    content = content[split_idx:].lstrip()
+
+                for part in parts:
+                    await bot.send_message(chat_id=chat_id, text=part, parse_mode='Markdown')
+
+                cprint("✅ Telegram Report Sent!", "green")
+            except Exception as e:
+                cprint(f"❌ Telegram Send Error: {e}", "red")
+
+        try:
+            asyncio.run(_send(full_message))
         except Exception as e:
-            cprint(f"❌ Telegram Send Error: {e}", "red")
+            cprint(f"❌ Telegram Async Error: {e}", "red")
 
     def job(self):
         """Job to run on schedule"""

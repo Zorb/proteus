@@ -10,7 +10,7 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 # AI Configuration
 ANTHROPIC_KEY = os.getenv('ANTHROPIC_KEY')
-MODEL_NAME = "claude-3-5-sonnet-20240620"
+MODEL_NAME = "claude-sonnet-4-5-20250929"
 
 # Schedule Configuration
 SCHEDULE_TIME = "08:00"  # Time to run daily analysis (24h format)
@@ -27,17 +27,33 @@ For each stock, consider:
 2. Recent news sentiment (if available).
 3. Key financial metrics (P/E, Market Cap, etc.).
 
-Provide a summary report in the following format:
+Provide a summary report formatted specifically for Telegram (using Markdown). Use the following structure:
 
-🚨 **Risk Alert** (if any immediate concerns)
-...
+🚨 *RISK ALERT* (Only if there are critical concerns, otherwise omit)
+[Details here]
 
-📊 **Portfolio Overview**
-...
+━━━━━━━━━━━━━━━━
 
-🔍 **Stock-by-Stock Analysis**
-- **[TICKER]**: [Risk Level: Low/Medium/High] - [Brief Analysis]
+📊 *PORTFOLIO OVERVIEW*
+• *Total Risk Level:* [Low/Medium/High]
+• *Market Sentiment:* [Bullish/Bearish/Neutral]
+• *Top Concern:* [Briefly]
 
-💡 **Recommendations**
-...
+━━━━━━━━━━━━━━━━
+
+🔍 *STOCK ANALYSIS*
+
+*1. [TICKER]*
+• *Risk:* [Level]
+• *Price:* [Current Price]
+• *Analysis:* [Concise analysis of volatility, news, and metrics]
+
+*2. [TICKER]*
+... (repeat for all)
+
+━━━━━━━━━━━━━━━━
+
+💡 *RECOMMENDATIONS*
+• [Actionable advice 1]
+• [Actionable advice 2]
 """
