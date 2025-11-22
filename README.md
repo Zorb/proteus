@@ -1,11 +1,11 @@
 # 🛡️ Stock Risk Agent
 
-An AI-powered agent that monitors your stock portfolio, assesses risk using Claude 3.5 Sonnet, and sends daily reports via Telegram.
+An AI-powered agent that monitors your stock portfolio, assesses risk using Claude Sonnet 4.5, and sends daily reports via Telegram.
 
 ## 🚀 Features
 - **Daily Analysis**: Runs automatically at a scheduled time.
 - **Yahoo Finance Data**: Fetches prices, news, and fundamentals.
-- **Claude AI**: Provides deep risk assessment and recommendations.
+- **Claude Sonnet 4.5**: Provides deep risk assessment and recommendations.
 - **Telegram Alerts**: Delivers reports directly to your phone.
 - **Cost Tracking**: Shows the exact cost of each AI analysis.
 - **Dockerized**: Easy to deploy on Raspberry Pi.
@@ -21,11 +21,11 @@ An AI-powered agent that monitors your stock portfolio, assesses risk using Clau
    ```
 
 2. **Set Portfolio**:
-   Edit `portfolio.csv` with your stocks:
+   Edit `portfolio.csv` with your stocks (or copy from `portfolio.example.csv`):
    ```csv
-   Ticker,Position_Size,Avg_Price
-   AAPL,10,150.00
-   TSLA,5,200.00
+   Ticker,Shares,Cost_Basis
+   AAPL,50,150.00
+   MSFT,30,280.00
    ```
 
 3. **Run with Docker**:
