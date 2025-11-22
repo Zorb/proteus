@@ -1,0 +1,7 @@
+yfinance
+python-telegram-bot
+schedule
+anthropic
+python-dotenv
+pandas
+termcolor

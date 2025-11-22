@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  stock-risk-agent:
+    build: .
+    container_name: stock_risk_agent
+    restart: unless-stopped
+    volumes:
+      - ./portfolio.csv:/app/portfolio.csv
+      - ./.env:/app/.env
+    environment:
+      - PYTHONUNBUFFERED=1
