@@ -1,0 +1,108 @@
+INTERACTIVE BROKERS FLEX QUERY SETUP
+=====================================
+
+Proteus can automatically fetch your portfolio from Interactive Brokers
+using the Flex Query API. This replaces the need to manually update
+portfolio.csv. If IBKR is unavailable, Proteus falls back to the CSV.
+
+Follow these steps to set it up (takes ~5 minutes).
+
+
+STEP 1: CREATE A FLEX QUERY
+----------------------------
+1. Log into IBKR Account Management:
+   https://www.interactivebrokers.com/sso/Login
+
+2. Navigate to:
+   Performance & Reports > Flex Queries
+
+3. Under "Custom Flex Queries", click the "+" button to create a new
+   Activity Flex Query.
+
+4. Give it a name, e.g. "Proteus Portfolio Sync"
+
+5. In the query configuration, find the "Open Positions" section and
+   enable it. Select these fields:
+   - Symbol
+   - Position (quantity)
+   - CostBasisPrice
+   - Currency
+   - AssetCategory
+   - ListingExchange
+
+6. Set the output format to XML.
+
+7. Save the query.
+
+8. After saving, you'll see your new query listed with a Query ID
+   (a number like 123456). Note this down.
+
+
+STEP 2: GENERATE AN API TOKEN
+-------------------------------
+1. You should still be on the Flex Queries page from Step 1.
+   (Reporting > Flex Queries)
+
+2. On the right-hand side of the page, find the section called
+   "Flex Web Service Configuration" and click into it.
+
+3. Check the box next to "Flex Web Service Status" to enable it.
+
+4. Click "Save". A "Current Token" value will appear — this is
+   your API key.
+
+5. Optionally, click "Generate New Token" to set a custom expiry
+   (6 hours to 1 year) and restrict access by IP address.
+
+6. Copy the token value.
+
+NOTE: If you don't see "Flex Web Service Configuration", try
+scrolling down or to the right on the Flex Queries page. On some
+screen sizes the section is pushed below the query lists.
+
+
+STEP 3: ADD CREDENTIALS TO .ENV
+---------------------------------
+Open your .env file and add these two lines:
+
+   IBKR_FLEX_TOKEN=your_token_here
+   IBKR_FLEX_QUERY_ID=123456
+
+Replace the values with your actual token and query ID from steps above.
+
+
+STEP 4: TEST IT
+----------------
+Run Proteus normally. You should see in the console output:
+
+   Fetching portfolio from Interactive Brokers...
+   Flex Query submitted (ref: XXXXXXXX)
+   Waiting for Flex statement to generate...
+   Parsed X stock positions from IBKR
+   Portfolio loaded from IBKR (X positions)
+
+If IBKR is unavailable or credentials are wrong, you'll see:
+
+   IBKR fetch failed, falling back to CSV
+   Portfolio loaded from CSV (X positions)
+
+
+NOTES
+------
+- The Flex Query API has a rate limit of roughly 1 request per 10
+  minutes for the same query. Since Proteus runs once daily, this
+  is not a concern.
+
+- The API token does not expire, but you can regenerate it at any
+  time from the IBKR Account Management page.
+
+- Only stock positions (AssetCategory = STK) are imported. Options,
+  futures, forex, and bonds are skipped.
+
+- Non-US stocks are automatically mapped to Yahoo Finance ticker
+  format using the listing exchange (e.g. LGEN on LSE becomes
+  LGEN.L). If a mapping is missing for your exchange, you can add
+  it to the EXCHANGE_SUFFIX dict in portfolio_sync.py.
+
+- If you don't set IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID in .env,
+  Proteus uses portfolio.csv as before — no change in behavior.

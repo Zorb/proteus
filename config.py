@@ -4,56 +4,91 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+# Notification Configuration
+NOTIFICATION_METHOD = os.getenv(
+    "NOTIFICATION_METHOD", "email"
+)  # "email", "telegram", or "both"
+
 # Telegram Configuration
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Email (SMTP) Configuration
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_TO = os.getenv("EMAIL_TO")  # comma-separated for multiple recipients
 
 # AI Configuration
-ANTHROPIC_KEY = os.getenv('ANTHROPIC_KEY')
-MODEL_NAME = "claude-sonnet-4-5-20250929"
+ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
+MODEL_NAME = "claude-opus-4-6"
+
+# Notion Configuration
+NOTION_KEY = os.getenv("NOTION_KEY")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+
+# Interactive Brokers Flex Query Configuration
+IBKR_FLEX_TOKEN = os.getenv("IBKR_FLEX_TOKEN")
+IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
+
+# Alpha Vantage Configuration (news sentiment)
+ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 
 # Schedule Configuration
 SCHEDULE_TIME = "08:00"  # Time to run daily analysis (24h format)
 
 # Risk Analysis Prompt
 RISK_PROMPT = """
-You are a professional financial risk analyst. Analyze the following stock portfolio data and provide a risk assessment.
+You are a financial risk analyst writing a daily briefing. You are given pre-calculated quantitative risk scores, raw market data, prediction market odds, and news sentiment.
 
-Portfolio Data:
+QUANTITATIVE RISK SCORES:
+{scores}
+
+RAW MARKET DATA:
 {data}
 
-For each stock, consider:
-1. Recent price action and volatility (based on OHLCV data).
-2. Recent news sentiment (if available).
-3. Key financial metrics (P/E, Market Cap, etc.).
+PREDICTION MARKET DATA (Polymarket):
+{polymarket_data}
 
-Provide a summary report formatted specifically for Telegram (using Markdown). Use the following structure:
+NEWS SENTIMENT DATA (Alpha Vantage):
+{news_sentiment_data}
 
-🚨 *RISK ALERT* (Only if there are critical concerns, otherwise omit)
-[Details here]
+SCORING REFERENCE:
+- Each category is scored 0-100 (0 = safe, 100 = maximum risk)
+- Green (0-35), Yellow (35-65), Red (65-100)
+- Red Alert triggers if any single category exceeds 80 or portfolio composite exceeds 65
+- Categories and weights: Drawdown (20%), Downside Volatility (20%), Correlation (15%), Balance Sheet (15%), Liquidity (10%), Concentration (10%), Regime Sensitivity (10%)
+- Polymarket shows market-implied earnings odds. Weight these more than news sentiment when they conflict.
+- Alpha Vantage sentiment ranges from -0.35 (bearish) to +0.35 (bullish).
+- If data is missing for a source, skip it. Do not fabricate.
 
-━━━━━━━━━━━━━━━━
+WRITING RULES:
+- Write like you are briefing a friend who invests. Conversational, not academic.
+- Every claim must cite a number: a score, percentage, dollar value, ratio, or data point.
+- Keep it concise. 2-3 sentences per stock, no more.
+- No asterisks, no em dashes, no decorative Unicode (no ━, no •). Use plain text only.
+- Use line breaks between sections. No horizontal rules.
+- Section headers should be plain uppercase text on their own line (e.g. OVERVIEW, not *OVERVIEW* or 📊 OVERVIEW).
+- Do not use emoji anywhere in the report.
 
-📊 *PORTFOLIO OVERVIEW*
-• *Total Risk Level:* [Low/Medium/High]
-• *Market Sentiment:* [Bullish/Bearish/Neutral]
-• *Top Concern:* [Briefly]
+FORMAT:
 
-━━━━━━━━━━━━━━━━
+ALERT
+(Only include this section if red_alert is true. One sentence: what triggered it and the number.)
 
-🔍 *STOCK ANALYSIS*
+OVERVIEW
+Portfolio risk score: [X]/100 ([rating]). Total value: $[X]. VIX is at [X] and the 10Y yield is [X]%. Biggest concern across the portfolio: [category] averaging [X]/100.
 
-*1. [TICKER]*
-• *Risk:* [Level]
-• *Price:* [Current Price]
-• *Analysis:* [Concise analysis of volatility, news, and metrics]
+[TICKER] - [score]/100
+[2-3 plain sentences. What is happening with this stock right now? Cite the price, the worst risk category and its score, any notable P/E or drawdown numbers, and sentiment if available. Keep it natural.]
 
-*2. [TICKER]*
-... (repeat for all)
+[TICKER] - [score]/100
+[Same format, repeat for each stock.]
 
-━━━━━━━━━━━━━━━━
-
-💡 *RECOMMENDATIONS*
-• [Actionable advice 1]
-• [Actionable advice 2]
+WHAT TO DO
+1. [Specific action with reasoning and the numbers behind it]
+2. [Another action]
+3. [Optional third action if warranted]
 """

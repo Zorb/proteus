@@ -4,4 +4,6 @@ schedule
 anthropic
 python-dotenv
 pandas
+numpy
 termcolor
+notion-client

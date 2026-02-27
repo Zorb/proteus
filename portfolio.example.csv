@@ -1,4 +1,4 @@
-Ticker,Shares,Cost_Basis
+Ticker,Position_Size,Avg_Price
 AAPL,50,150.00
 MSFT,30,280.00
 GOOGL,20,120.00
