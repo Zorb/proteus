@@ -181,22 +181,31 @@ class StockRiskAgent:
         """Main analysis logic with quantitative risk scoring."""
         cprint("\n📊 Starting Portfolio Analysis...", "cyan")
 
-        # Load portfolio (IBKR first, CSV fallback)
+        # Load portfolio based on configured source (falls back to CSV)
+        source = (config.PORTFOLIO_SOURCE or "csv").lower()
         df = None
-        if config.IBKR_FLEX_TOKEN and config.IBKR_FLEX_QUERY_ID:
+
+        if source == "ibkr":
             cprint("🏦 Fetching portfolio from Interactive Brokers...", "cyan")
             df = portfolio_sync.fetch_ibkr_portfolio()
             if df is not None:
                 cprint(f"✅ Portfolio loaded from IBKR ({len(df)} positions)", "green")
             else:
                 cprint("⚠️ IBKR fetch failed, falling back to CSV", "yellow")
+        elif source == "t212":
+            cprint("🏦 Fetching portfolio from Trading 212...", "cyan")
+            df = portfolio_sync.fetch_t212_portfolio()
+            if df is not None:
+                cprint(f"✅ Portfolio loaded from Trading 212 ({len(df)} positions)", "green")
+            else:
+                cprint("⚠️ Trading 212 fetch failed, falling back to CSV", "yellow")
 
         if df is None:
             try:
                 df = pd.read_csv(self.portfolio_file)
                 cprint(f"📄 Portfolio loaded from CSV ({len(df)} positions)", "cyan")
             except FileNotFoundError:
-                cprint("❌ portfolio.csv not found and IBKR not configured!", "red")
+                cprint(f"❌ portfolio.csv not found and {source} not available!", "red")
                 return
 
         # Fetch benchmarks once

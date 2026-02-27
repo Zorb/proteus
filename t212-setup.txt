@@ -1,0 +1,79 @@
+TRADING 212 API SETUP
+=====================
+
+Proteus can automatically fetch your portfolio from Trading 212
+using their REST API. This replaces the need to manually update
+portfolio.csv. If Trading 212 is unavailable, Proteus falls back
+to the CSV.
+
+NOTE: The Trading 212 API is currently in beta. It only works with
+Invest and Stocks ISA accounts (not CFD accounts).
+
+Follow these steps to set it up (takes ~2 minutes).
+
+
+STEP 1: GENERATE AN API KEY
+-----------------------------
+1. Log into Trading 212 (web or mobile app).
+
+2. Go to Settings > API (Beta).
+
+3. Accept the risk warning if prompted.
+
+4. Click "Generate API key".
+
+5. Give it a name (e.g. "Proteus") and optionally restrict
+   access to your IP address.
+
+6. Copy the API key. The secret is shown only once — save it
+   somewhere safe.
+
+
+STEP 2: ADD CREDENTIALS TO .ENV
+---------------------------------
+Open your .env file and add these lines:
+
+   T212_API_KEY=your_api_key_here
+   PORTFOLIO_SOURCE=t212
+
+The PORTFOLIO_SOURCE flag tells Proteus which broker to use:
+   - csv   (default) — read from portfolio.csv
+   - t212  — fetch from Trading 212 API
+   - ibkr  — fetch from Interactive Brokers Flex Query
+
+
+STEP 3: TEST IT
+----------------
+Run Proteus normally. You should see in the console output:
+
+   Fetching portfolio from Trading 212...
+   Parsed X positions from Trading 212
+   Portfolio loaded from Trading 212 (X positions)
+
+If Trading 212 is unavailable or the API key is wrong, you'll see:
+
+   Trading 212 fetch failed, falling back to CSV
+   Portfolio loaded from CSV (X positions)
+
+
+NOTES
+------
+- The API has a rate limit of 1 request per 5 seconds for the
+  portfolio endpoint. Since Proteus runs once daily, this is
+  not a concern.
+
+- You can revoke or regenerate your API key at any time from
+  Settings > API (Beta) in Trading 212.
+
+- Trading 212 uses its own ticker format (e.g. AAPL_US_EQ,
+  LGEN_GB_EQ). Proteus automatically converts these to Yahoo
+  Finance format (AAPL, LGEN.L, etc.). If a mapping is missing
+  for your country, you can add it to T212_COUNTRY_SUFFIX in
+  portfolio_sync.py.
+
+- Only equity positions are imported. Fractional shares are
+  supported.
+
+- If you don't set T212_API_KEY and PORTFOLIO_SOURCE=t212 in
+  .env, Proteus uses portfolio.csv as before — no change in
+  behavior.

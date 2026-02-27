@@ -4,7 +4,7 @@ AI-powered stock portfolio risk monitor. Runs daily, scores your holdings across
 
 ## How it works
 
-1. Loads your portfolio from Interactive Brokers (or a CSV fallback)
+1. Loads your portfolio from Interactive Brokers, Trading 212, or a CSV file
 2. Fetches price history, fundamentals, and news from Yahoo Finance
 3. Scores each stock 0-100 across 7 risk categories (drawdown, volatility, liquidity, balance sheet, correlation, concentration, regime sensitivity)
 4. Pulls Polymarket earnings predictions and Alpha Vantage news sentiment
@@ -37,9 +37,15 @@ TELEGRAM_CHAT_ID=your_chat_id
 # Optional: Alpha Vantage news sentiment (free key, 25 req/day)
 ALPHAVANTAGE_API_KEY=your_key
 
+# Optional: Portfolio source ("csv", "ibkr", or "t212")
+PORTFOLIO_SOURCE=csv
+
 # Optional: Interactive Brokers portfolio sync
 IBKR_FLEX_TOKEN=your_token
 IBKR_FLEX_QUERY_ID=your_query_id
+
+# Optional: Trading 212 portfolio sync
+T212_API_KEY=your_api_key
 ```
 
 ### 2. Portfolio
@@ -52,7 +58,11 @@ AAPL,50,150.00
 MSFT,30,280.00
 ```
 
-To sync automatically from Interactive Brokers instead, see [ibkr-setup.txt](ibkr-setup.txt) for Flex Query configuration instructions.
+To sync automatically from a broker instead of maintaining the CSV manually:
+- **Interactive Brokers** — set `PORTFOLIO_SOURCE=ibkr`, see [ibkr-setup.txt](ibkr-setup.txt)
+- **Trading 212** — set `PORTFOLIO_SOURCE=t212`, see [t212-setup.txt](t212-setup.txt)
+
+If the broker fetch fails, Proteus falls back to `portfolio.csv` automatically.
 
 ### 3. Run
 
@@ -88,3 +98,4 @@ Each scored 0-100. Green (0-35), Yellow (35-65), Red (65-100). Alert triggers if
 - **Polymarket** — earnings prediction probabilities (free, no auth)
 - **Alpha Vantage** — AI-scored news sentiment from 50+ outlets (free API key)
 - **Interactive Brokers** — live portfolio positions via Flex Query (optional)
+- **Trading 212** — live portfolio positions via REST API (optional)

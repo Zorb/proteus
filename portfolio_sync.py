@@ -1,11 +1,11 @@
 """
-portfolio_sync.py — Fetch portfolio from Interactive Brokers via Flex Queries.
+portfolio_sync.py — Fetch portfolio from broker APIs.
 
-Two-step API flow:
-1. SendRequest — submit the query, get a ReferenceCode
-2. GetStatement — retrieve the results as XML (after a short delay)
+Supports:
+- Interactive Brokers (Flex Query API — XML, two-step request/poll)
+- Trading 212 (REST API — JSON, single GET request)
 
-Returns a DataFrame with columns: Ticker, Position_Size, Avg_Price
+Both return a DataFrame with columns: Ticker, Position_Size, Avg_Price
 matching the portfolio.csv schema. Returns None on any failure.
 """
 
@@ -228,3 +228,116 @@ def _parse_positions(xml_data):
 
     cprint(f"  📋 Parsed {len(positions)} stock positions from IBKR", "cyan")
     return positions
+
+
+# ── Trading 212 ──────────────────────────────────────────────
+
+T212_BASE_URL = "https://live.trading212.com"
+
+# Map Trading 212 country codes (from ticker format SYMBOL_CC_EQ) to Yahoo Finance suffixes.
+# US stocks get no suffix.
+T212_COUNTRY_SUFFIX = {
+    "US": "",
+    "GB": ".L",       # London Stock Exchange
+    "DE": ".DE",      # XETRA (Germany)
+    "FR": ".PA",      # Euronext Paris
+    "NL": ".AS",      # Euronext Amsterdam
+    "BE": ".BR",      # Euronext Brussels
+    "PT": ".LS",      # Euronext Lisbon
+    "IT": ".MI",      # Borsa Italiana (Milan)
+    "ES": ".MC",      # Bolsa de Madrid
+    "CH": ".SW",      # Swiss Exchange
+    "SE": ".ST",      # Stockholm (Nasdaq Nordic)
+    "NO": ".OL",      # Oslo Stock Exchange
+    "DK": ".CO",      # Copenhagen (Nasdaq Nordic)
+    "FI": ".HE",      # Helsinki (Nasdaq Nordic)
+    "CA": ".TO",      # Toronto Stock Exchange
+    "AU": ".AX",      # Australian Securities Exchange
+    "HK": ".HK",      # Hong Kong Stock Exchange
+    "SG": ".SI",      # Singapore Exchange
+    "JP": ".T",       # Tokyo Stock Exchange
+    "KR": ".KS",      # Korea Stock Exchange
+    "IN": ".NS",      # National Stock Exchange (India)
+    "ZA": ".JO",      # Johannesburg Stock Exchange
+    "BR": ".SA",      # Brazil
+    "MX": ".MX",      # Mexico
+    "PL": ".WA",      # Warsaw Stock Exchange
+    "AT": ".VI",      # Vienna Stock Exchange
+    "IE": ".IR",      # Irish Stock Exchange
+}
+
+
+def _t212_ticker_to_yahoo(t212_ticker):
+    """
+    Convert Trading 212 ticker format (e.g. 'AAPL_US_EQ') to Yahoo Finance format ('AAPL').
+
+    T212 format: SYMBOL_COUNTRY_TYPE (e.g. AAPL_US_EQ, LGEN_GB_EQ, SAP_DE_EQ)
+    """
+    parts = t212_ticker.rsplit("_", 2)
+    if len(parts) == 3:
+        symbol, country, _ = parts
+    elif len(parts) == 2:
+        symbol, country = parts[0], parts[1]
+    else:
+        symbol, country = t212_ticker, "US"
+
+    suffix = T212_COUNTRY_SUFFIX.get(country, "")
+    return f"{symbol}{suffix}"
+
+
+def fetch_t212_portfolio():
+    """
+    Fetch current open positions from Trading 212 via REST API.
+
+    Requires config.T212_API_KEY to be set.
+
+    Returns:
+        pd.DataFrame with columns [Ticker, Position_Size, Avg_Price] or None on failure.
+    """
+    api_key = config.T212_API_KEY
+
+    if not api_key:
+        cprint("⚠️ Trading 212 API key not configured", "yellow")
+        return None
+
+    url = f"{T212_BASE_URL}/api/v0/equity/portfolio"
+
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", api_key)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8")
+
+        data = json.loads(body)
+
+        if not data:
+            cprint("⚠️ No positions found in Trading 212 response", "yellow")
+            return None
+
+        positions = []
+        for pos in data:
+            t212_ticker = pos.get("ticker", "")
+            quantity = pos.get("quantity", 0)
+            avg_price = pos.get("averagePrice", 0)
+
+            if not t212_ticker or quantity == 0:
+                continue
+
+            yahoo_ticker = _t212_ticker_to_yahoo(t212_ticker)
+            positions.append({
+                "Ticker": yahoo_ticker,
+                "Position_Size": abs(quantity),
+                "Avg_Price": round(avg_price, 4),
+            })
+
+        if not positions:
+            cprint("⚠️ No equity positions found in Trading 212 response", "yellow")
+            return None
+
+        cprint(f"  📋 Parsed {len(positions)} positions from Trading 212", "cyan")
+        df = pd.DataFrame(positions)
+        return df
+
+    except Exception as e:
+        cprint(f"  ❌ Trading 212 API error: {e}", "red")
+        return None

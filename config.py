@@ -29,9 +29,15 @@ MODEL_NAME = "claude-opus-4-6"
 NOTION_KEY = os.getenv("NOTION_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
+# Portfolio Source Configuration
+PORTFOLIO_SOURCE = os.getenv("PORTFOLIO_SOURCE", "csv")  # "ibkr", "t212", or "csv"
+
 # Interactive Brokers Flex Query Configuration
 IBKR_FLEX_TOKEN = os.getenv("IBKR_FLEX_TOKEN")
 IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
+
+# Trading 212 Configuration
+T212_API_KEY = os.getenv("T212_API_KEY")
 
 # Alpha Vantage Configuration (news sentiment)
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
