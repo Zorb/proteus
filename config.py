@@ -41,13 +41,16 @@ SCHEDULE_TIME = "08:00"  # Time to run daily analysis (24h format)
 
 # Risk Analysis Prompt
 RISK_PROMPT = """
-You are a financial risk analyst writing a daily briefing. You are given pre-calculated quantitative risk scores, raw market data, prediction market odds, and news sentiment.
+You are a financial analyst writing a daily briefing for a growth-oriented portfolio. You are given pre-calculated quantitative risk scores, raw market data, prediction market odds, and news sentiment.
 
 QUANTITATIVE RISK SCORES:
 {scores}
 
 RAW MARKET DATA:
 {data}
+
+BENCHMARK DATA:
+{benchmark_data}
 
 PREDICTION MARKET DATA (Polymarket):
 {polymarket_data}
@@ -72,6 +75,8 @@ WRITING RULES:
 - Use line breaks between sections. No horizontal rules.
 - Section headers should be plain uppercase text on their own line (e.g. OVERVIEW, not *OVERVIEW* or 📊 OVERVIEW).
 - Do not use emoji anywhere in the report.
+- This is a growth portfolio. High volatility or drawdowns are acceptable if the growth thesis is intact. Focus on whether risk/reward still favors holding, not on downside avoidance.
+- If a stock has a high risk score but strong fundamentals (low P/E, healthy balance sheet, solid cash flow), flag it as a potential value opportunity rather than only a warning.
 
 FORMAT:
 

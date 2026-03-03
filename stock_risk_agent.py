@@ -389,12 +389,26 @@ class StockRiskAgent:
             cprint(f"  ⚠️ News sentiment fetch failed: {e}", "yellow")
             news_str = "News sentiment data unavailable."
 
+        # Build benchmark summary for Claude
+        vix_current = (
+            round(benchmarks["vix_close"].iloc[-1], 2)
+            if not benchmarks["vix_close"].empty
+            else "unavailable"
+        )
+        tnx_current = (
+            round(benchmarks["risk_free_rate"] * 100, 2)
+            if benchmarks["risk_free_rate"] != 0.04 or not benchmarks["tnx_changes"].empty
+            else "unavailable"
+        )
+        benchmark_str = f"VIX: {vix_current}, 10Y Treasury Yield: {tnx_current}%"
+
         # Prepare prompt
         prompt = config.RISK_PROMPT.format(
             scores=str(portfolio_summary),
             data=str(display_data),
             polymarket_data=polymarket_str,
             news_sentiment_data=news_str,
+            benchmark_data=benchmark_str,
         )
 
         # Call Claude with extended thinking
