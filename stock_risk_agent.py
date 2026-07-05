@@ -71,6 +71,8 @@ class StockRiskAgent:
         cprint("📈 Fetching benchmark data (SPY, VIX, TNX)...", "cyan")
         benchmarks = {}
         try:
+            # 3y windows so regime analysis can see past stress events,
+            # not just the (possibly calm) trailing year
             spy_hist = _retry(
                 lambda: yf.Ticker("SPY").history(period="3y"), label="SPY"
             )
@@ -85,7 +87,7 @@ class StockRiskAgent:
 
         try:
             vix_hist = _retry(
-                lambda: yf.Ticker("^VIX").history(period="1y"), label="VIX"
+                lambda: yf.Ticker("^VIX").history(period="3y"), label="VIX"
             )
             benchmarks["vix_close"] = (
                 rf.normalize_daily_index(vix_hist["Close"])
@@ -98,7 +100,7 @@ class StockRiskAgent:
 
         try:
             tnx_hist = _retry(
-                lambda: yf.Ticker("^TNX").history(period="1y"), label="TNX"
+                lambda: yf.Ticker("^TNX").history(period="3y"), label="TNX"
             )
             if not tnx_hist.empty:
                 benchmarks["tnx_changes"] = rf.normalize_daily_index(
@@ -129,9 +131,7 @@ class StockRiskAgent:
             # Price history at multiple timeframes (with retry)
             hist_1y = _retry(lambda: stock.history(period="1y"), label=f"{ticker} 1y")
             hist_3y = _retry(lambda: stock.history(period="3y"), label=f"{ticker} 3y")
-            hist_max = _retry(
-                lambda: stock.history(period="max"), label=f"{ticker} max"
-            )
+            hist_5y = _retry(lambda: stock.history(period="5y"), label=f"{ticker} 5y")
 
             # Recent closes for display (JSON-safe, no Timestamp keys)
             recent_closes = [
@@ -179,7 +179,7 @@ class StockRiskAgent:
                 "recent_closes": recent_closes,
                 "hist_1y": hist_1y,
                 "hist_3y": hist_3y,
-                "hist_max": hist_max,
+                "hist_5y": hist_5y,
                 "news": news_summary,
                 "pe_ratio": info.get("trailingPE"),
                 "market_cap": info.get("marketCap"),
@@ -288,12 +288,21 @@ class StockRiskAgent:
                 )
                 weights_dict[d["ticker"]] = d["position_pct"] / 100
 
+        # Renormalize weights over tickers that actually have history, so a
+        # ticker without data doesn't silently shrink portfolio moves
         if returns_dict:
             all_returns_df = pd.DataFrame(returns_dict).dropna()
-            portfolio_returns = sum(
-                all_returns_df[t] * weights_dict[t] for t in all_returns_df.columns
+            w_total = sum(weights_dict[t] for t in all_returns_df.columns)
+            portfolio_returns = (
+                sum(
+                    all_returns_df[t] * weights_dict[t] / w_total
+                    for t in all_returns_df.columns
+                )
+                if w_total > 0
+                else None
             )
         else:
+            all_returns_df = None
             portfolio_returns = None
 
         # Score each stock
@@ -306,7 +315,7 @@ class StockRiskAgent:
 
             # Individual metrics
             drawdown = rf.score_drawdown_profile(
-                d["hist_1y"], d["hist_3y"], d["hist_max"]
+                d["hist_1y"], d["hist_3y"], d["hist_5y"]
             )
             downside = rf.score_downside_volatility(
                 returns_1y, spy_ret, benchmarks["risk_free_rate"]
@@ -332,15 +341,31 @@ class StockRiskAgent:
                 ]
             )
 
-            # Portfolio-level metrics
+            # Portfolio excluding this stock (leave-one-out) — a large position
+            # otherwise correlates mechanically with the portfolio it dominates
+            portfolio_ex_stock = None
+            if all_returns_df is not None and ticker in all_returns_df.columns:
+                others = [t for t in all_returns_df.columns if t != ticker]
+                w_others = sum(weights_dict[t] for t in others)
+                if others and w_others > 0:
+                    portfolio_ex_stock = sum(
+                        all_returns_df[t] * weights_dict[t] / w_others for t in others
+                    )
+
             correlation = rf.score_correlation_risk(
-                returns_1y, portfolio_returns, spy_ret, d.get("sector"), sector_weights
+                returns_1y, portfolio_ex_stock, spy_ret, d.get("sector"), sector_weights
             )
             concentration = rf.score_concentration_risk(
                 d["position_pct"], individual_avg
             )
+            # 3y returns so the regime window contains actual stress events
+            returns_3y = (
+                rf.normalize_daily_index(d["hist_3y"]["Close"].pct_change().dropna())
+                if d["hist_3y"] is not None and len(d["hist_3y"]) > 0
+                else returns_1y
+            )
             regime = rf.score_regime_sensitivity(
-                returns_1y, benchmarks["tnx_changes"], benchmarks["vix_close"]
+                returns_3y, benchmarks["tnx_changes"], benchmarks["vix_close"]
             )
 
             scores = {
@@ -373,9 +398,19 @@ class StockRiskAgent:
             for s in all_scores
         )
         portfolio_composite = round(portfolio_composite)
-        portfolio_red_alert = (
-            any(s["composite"]["red_alert"] for s in all_scores)
-            or portfolio_composite > 65
+        portfolio_red_alert = rf.portfolio_red_alert(
+            all_scores, portfolio_composite, config.ALERT_MIN_POSITION_PCT
+        )
+
+        # True portfolio-level risk from aggregated returns — the weighted
+        # average of per-stock composites can't see diversification benefit
+        portfolio_level = rf.score_portfolio_level(
+            portfolio_returns, benchmarks["spy_returns"], benchmarks["risk_free_rate"]
+        )
+        sector_hhi = (
+            round(sum(w**2 for w in sector_weights.values()), 3)
+            if sector_weights
+            else None
         )
 
         portfolio_summary = {
@@ -383,6 +418,8 @@ class StockRiskAgent:
             "portfolio_composite_score": portfolio_composite,
             "portfolio_rating": rf._rating(portfolio_composite),
             "portfolio_red_alert": portfolio_red_alert,
+            "sector_hhi": sector_hhi,
+            "portfolio_level_metrics": portfolio_level,
             "stocks": all_scores,
         }
         if skipped_tickers:
