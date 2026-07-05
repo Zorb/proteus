@@ -32,6 +32,10 @@ IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
 # Alpha Vantage Configuration (news sentiment)
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 
+# Alert Configuration
+# Positions below this % of the portfolio can't trigger a portfolio-wide red alert
+ALERT_MIN_POSITION_PCT = float(os.getenv("ALERT_MIN_POSITION_PCT", "5"))
+
 # Schedule Configuration
 SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "08:00")  # Time to run daily analysis (24h format)
 
@@ -57,7 +61,7 @@ NEWS SENTIMENT DATA (Alpha Vantage):
 SCORING REFERENCE:
 - Each category is scored 0-100 (0 = safe, 100 = maximum risk)
 - Green (0-35), Yellow (35-65), Red (65-100)
-- Red Alert triggers if any single category exceeds 80 or portfolio composite exceeds 65
+- Red Alert triggers when a position of meaningful size (at least 5% of the portfolio by default) goes red, or the portfolio composite exceeds 65. Smaller positions can be individually red without triggering a portfolio alert — still mention them, but don't lead with them.
 - Categories and weights: Drawdown (20%), Downside Volatility (20%), Correlation (15%), Balance Sheet (15%), Liquidity (10%), Concentration (10%), Regime Sensitivity (10%)
 - portfolio_level_metrics shows risk computed on the aggregated portfolio return stream (captures diversification the per-stock average cannot). sector_hhi measures sector concentration (near 1/number-of-sectors = diversified, 1.0 = single sector).
 - Polymarket shows market-implied earnings odds. Weight these more than news sentiment when they conflict.

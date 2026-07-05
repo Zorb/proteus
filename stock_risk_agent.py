@@ -398,9 +398,8 @@ class StockRiskAgent:
             for s in all_scores
         )
         portfolio_composite = round(portfolio_composite)
-        portfolio_red_alert = (
-            any(s["composite"]["red_alert"] for s in all_scores)
-            or portfolio_composite > 65
+        portfolio_red_alert = rf.portfolio_red_alert(
+            all_scores, portfolio_composite, config.ALERT_MIN_POSITION_PCT
         )
 
         # True portfolio-level risk from aggregated returns — the weighted

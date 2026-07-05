@@ -342,3 +342,33 @@ class TestComposite:
         result = rf.calculate_composite({})
         assert result["composite_score"] == 50
         assert result["red_alert"] is False
+
+
+class TestPortfolioRedAlert:
+    def _stock(self, position_pct, red_alert):
+        return {
+            "position_pct": position_pct,
+            "composite": {"red_alert": red_alert},
+        }
+
+    def test_tiny_red_position_does_not_flag_portfolio(self):
+        scores = [self._stock(1.5, True), self._stock(98.5, False)]
+        assert rf.portfolio_red_alert(scores, portfolio_composite=30) is False
+
+    def test_significant_red_position_flags_portfolio(self):
+        scores = [self._stock(10.0, True), self._stock(90.0, False)]
+        assert rf.portfolio_red_alert(scores, portfolio_composite=30) is True
+
+    def test_threshold_boundary(self):
+        scores = [self._stock(5.0, True)]
+        assert rf.portfolio_red_alert(scores, portfolio_composite=30) is True
+        scores = [self._stock(4.9, True)]
+        assert rf.portfolio_red_alert(scores, portfolio_composite=30) is False
+
+    def test_high_composite_is_ungated(self):
+        scores = [self._stock(1.0, True)]
+        assert rf.portfolio_red_alert(scores, portfolio_composite=70) is True
+
+    def test_custom_threshold(self):
+        scores = [self._stock(3.0, True)]
+        assert rf.portfolio_red_alert(scores, 30, min_position_pct=2.0) is True

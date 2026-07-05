@@ -474,6 +474,21 @@ WEIGHTS = {
 }
 
 
+def portfolio_red_alert(all_scores, portfolio_composite, min_position_pct=5.0):
+    """Portfolio-wide red alert.
+
+    A stock's own red alert only escalates to the portfolio level if the
+    position is at least min_position_pct of the portfolio — a 1% speculative
+    position going red shouldn't flag the whole portfolio. The portfolio
+    composite check is ungated.
+    """
+    significant_stock_alert = any(
+        s["composite"]["red_alert"] and s["position_pct"] >= min_position_pct
+        for s in all_scores
+    )
+    return significant_stock_alert or portfolio_composite > 65
+
+
 def calculate_composite(scores_dict):
     """
     Calculate weighted composite score from individual category scores.

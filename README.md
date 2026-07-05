@@ -87,7 +87,7 @@ python -m pytest tests/
 | Concentration | 10% | Position size risk |
 | Regime Sensitivity | 10% | Performance during rate spikes and VIX crises |
 
-Each scored 0-100. Green (0-35), Yellow (35-65), Red (65-100). Alert triggers if any category exceeds 80 or the portfolio composite exceeds 65.
+Each scored 0-100. Green (0-35), Yellow (35-65), Red (65-100). A red alert triggers if a position of at least 5% of the portfolio (configurable via `ALERT_MIN_POSITION_PCT`) has a category above 80 or goes red overall, or if the portfolio composite exceeds 65. Smaller positions can be individually red without flagging the whole portfolio.
 
 ## Data sources
 
