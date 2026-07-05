@@ -64,42 +64,43 @@ def _ulcer_index(prices, window=14):
 # ---------------------------------------------------------------------------
 # 1. Drawdown Profile (20%)
 # ---------------------------------------------------------------------------
-def score_drawdown_profile(hist_1y, hist_3y, hist_max):
-    """Score based on max drawdown 1yr/3yr, drawdown from ATH, Ulcer Index."""
+def score_drawdown_profile(hist_1y, hist_3y, hist_5y):
+    """Score based on max drawdown 1yr/3yr, drawdown from 5y high, Ulcer Index."""
     details = {}
 
-    # Max drawdown 1yr
     close_1y = hist_1y["Close"] if hist_1y is not None and len(hist_1y) > 0 else None
     close_3y = hist_3y["Close"] if hist_3y is not None and len(hist_3y) > 0 else None
-    close_max = (
-        hist_max["Close"] if hist_max is not None and len(hist_max) > 0 else None
-    )
+    close_5y = hist_5y["Close"] if hist_5y is not None and len(hist_5y) > 0 else None
 
     dd_1y = _max_drawdown(close_1y) if close_1y is not None else 0
     dd_3y = _max_drawdown(close_3y) if close_3y is not None else 0
 
-    # Current drawdown from ATH
-    if close_max is not None and len(close_max) > 0:
-        ath = close_max.max()
-        current = close_max.iloc[-1]
-        dd_from_ath = (ath - current) / ath if ath > 0 else 0
+    # Current drawdown from 5y high. Capped lookback: a stock permanently below
+    # a decades-old bubble peak shouldn't carry elevated drawdown risk forever.
+    if close_5y is not None and len(close_5y) > 0:
+        recent = close_5y.tail(252 * 5)
+        high_5y = recent.max()
+        current = recent.iloc[-1]
+        dd_from_high = (high_5y - current) / high_5y if high_5y > 0 else 0
     else:
-        dd_from_ath = 0
+        dd_from_high = 0
 
     # Ulcer Index on 1yr data
     ulcer = _ulcer_index(close_1y) if close_1y is not None else 0
 
     details["max_dd_1y"] = round(dd_1y * 100, 2)
     details["max_dd_3y"] = round(dd_3y * 100, 2)
-    details["dd_from_ath"] = round(dd_from_ath * 100, 2)
+    details["dd_from_5y_high"] = round(dd_from_high * 100, 2)
     details["ulcer_index"] = round(ulcer, 2)
 
-    # Score: weighted blend of drawdown metrics, mapped 0-100
-    # 10% DD → ~25 score, 30% DD → ~75, 50%+ DD → ~100
-    dd_blend = (dd_1y * 0.35 + dd_3y * 0.25 + dd_from_ath * 0.25) * 100
-    ulcer_contrib = min(ulcer * 2, 30)  # Ulcer capped at 30 points contribution
-    raw_score = dd_blend * 2.0 + ulcer_contrib * 0.15
+    # Drawdown blend (weights sum to 1.0), mapped so that
+    # 10% DD → ~25 score, 30% DD → ~75, 50%+ DD → 100
+    dd_blend = dd_1y * 0.4 + dd_3y * 0.3 + dd_from_high * 0.3
+    dd_score = _clamp(dd_blend * 100 * 2.5)
+    # Ulcer: ~5 → mild, ~10 → elevated, 20+ → severe sustained drawdowns
+    ulcer_score = _clamp(ulcer * 5)
 
+    raw_score = dd_score * 0.80 + ulcer_score * 0.20
     score = _clamp(round(raw_score))
     return {"score": score, "rating": _rating(score), "details": details}
 
@@ -279,7 +280,11 @@ def score_balance_sheet(balance_sheet_df, income_stmt_df):
 def score_correlation_risk(
     stock_returns, portfolio_returns, spy_returns, sector, sector_weights
 ):
-    """Score based on SPY correlation, portfolio correlation, down-market correlation, sector concentration."""
+    """Score based on SPY correlation, portfolio correlation, down-market correlation, sector concentration.
+
+    portfolio_returns should EXCLUDE this stock (leave-one-out) — otherwise a
+    large position mechanically correlates with the portfolio it dominates.
+    """
     details = {}
 
     if stock_returns is None or len(stock_returns) < 30:
@@ -326,18 +331,17 @@ def score_correlation_risk(
         down_corr = 0.5
     details["down_market_correlation"] = down_corr
 
-    # Sector concentration (value-weighted HHI)
-    if sector_weights:
-        hhi = sum(w**2 for w in sector_weights.values())
-        details["sector_hhi"] = round(hhi, 3)
-        # This stock's sector weight in portfolio
-        same_sector_wt = sector_weights.get(sector, 0) if sector else 0
+    # Sector concentration: this stock's sector weight in the portfolio.
+    # (Portfolio-wide HHI is identical for every stock, so it can't
+    # differentiate holdings — it's reported at portfolio level instead.)
+    if sector_weights and sector:
+        same_sector_wt = sector_weights.get(sector, 0)
         details["same_sector_pct"] = round(same_sector_wt * 100, 1)
+        # 25% of portfolio in this sector → 40, 40% → 64, 50%+ → 80+
+        sector_score = _clamp(same_sector_wt * 160)
     else:
-        hhi = 0.5
-        same_sector_wt = 0
-        details["sector_hhi"] = None
         details["same_sector_pct"] = None
+        sector_score = 50  # sector unknown → neutral
 
     # Score
     # High SPY correlation → less diversification benefit → higher risk
@@ -346,14 +350,12 @@ def score_correlation_risk(
     port_corr_score = _clamp(port_corr * 60)
     # Down-market correlation penalized more
     down_corr_score = _clamp(down_corr * 80)
-    # HHI: 1/n → perfectly diversified, 1.0 → fully concentrated
-    hhi_score = _clamp(hhi * 100)
 
     raw = (
         corr_score * 0.25
         + port_corr_score * 0.20
         + down_corr_score * 0.30
-        + hhi_score * 0.25
+        + sector_score * 0.25
     )
     score = _clamp(round(raw))
     return {"score": score, "rating": _rating(score), "details": details}
@@ -385,13 +387,22 @@ def score_concentration_risk(position_pct, individual_score):
 # 7. Regime Sensitivity (10%)
 # ---------------------------------------------------------------------------
 def score_regime_sensitivity(returns, tnx_changes, vix_series):
-    """Score based on performance during rate spikes and VIX crises."""
+    """Score based on performance during rate spikes and VIX crises.
+
+    A regime with too few observed stress days is treated as UNTESTED
+    (excluded), not safe — if neither regime has enough stress history the
+    score is neutral 50 rather than 0. Pass multi-year returns so the window
+    actually contains past stress events.
+    """
     details = {}
 
     if returns is None or len(returns) < 30:
         return {"score": 50, "rating": "yellow", "details": {"data_available": False}}
 
+    component_scores = []
+
     # Rate spike regime: days when TNX rises >2 std devs
+    rate_spike_return = None
     if tnx_changes is not None and len(tnx_changes) > 30:
         aligned = pd.DataFrame({"stock": returns, "tnx": tnx_changes}).dropna()
         tnx_std = aligned["tnx"].std()
@@ -399,34 +410,54 @@ def score_regime_sensitivity(returns, tnx_changes, vix_series):
             spike_days = aligned[aligned["tnx"] > 2 * tnx_std]
             if len(spike_days) > 3:
                 rate_spike_return = spike_days["stock"].mean() * 100
-            else:
-                rate_spike_return = 0
-        else:
-            rate_spike_return = 0
-    else:
-        rate_spike_return = 0
-    details["avg_return_rate_spike_pct"] = round(rate_spike_return, 3)
+                # -0.5%/day during spikes → moderate, -2%+ → very bad
+                component_scores.append(_clamp(abs(min(rate_spike_return, 0)) * 30))
+    details["avg_return_rate_spike_pct"] = (
+        round(rate_spike_return, 3) if rate_spike_return is not None else None
+    )
 
     # VIX crisis regime: days when VIX > 25
+    vix_crisis_return = None
     if vix_series is not None and len(vix_series) > 0:
         aligned = pd.DataFrame({"stock": returns, "vix": vix_series}).dropna()
         crisis_days = aligned[aligned["vix"] > 25]
         if len(crisis_days) > 3:
             vix_crisis_return = crisis_days["stock"].mean() * 100
-        else:
-            vix_crisis_return = 0
-    else:
-        vix_crisis_return = 0
-    details["avg_return_vix_crisis_pct"] = round(vix_crisis_return, 3)
+            component_scores.append(_clamp(abs(min(vix_crisis_return, 0)) * 30))
+    details["avg_return_vix_crisis_pct"] = (
+        round(vix_crisis_return, 3) if vix_crisis_return is not None else None
+    )
 
-    # Score: negative returns during stress → higher score
-    # -0.5% per day during crisis → moderate, -2%+ → very bad
-    rate_score = _clamp(abs(min(rate_spike_return, 0)) * 30)
-    vix_score = _clamp(abs(min(vix_crisis_return, 0)) * 30)
+    if not component_scores:
+        details["insufficient_stress_history"] = True
+        return {"score": 50, "rating": "yellow", "details": details}
 
-    raw = rate_score * 0.50 + vix_score * 0.50
-    score = _clamp(round(raw))
+    score = _clamp(round(sum(component_scores) / len(component_scores)))
     return {"score": score, "rating": _rating(score), "details": details}
+
+
+# ---------------------------------------------------------------------------
+# Portfolio-level metrics
+# ---------------------------------------------------------------------------
+def score_portfolio_level(portfolio_returns, spy_returns, risk_free_rate=0.04):
+    """Risk metrics computed on the aggregated portfolio return stream.
+
+    The composite is a weighted average of per-stock scores, which is blind to
+    diversification — ten uncorrelated risky stocks and one concentrated bet
+    can average the same. Scoring the actual portfolio returns captures it.
+    Returns None if there is not enough data.
+    """
+    if portfolio_returns is None or len(portfolio_returns) < 20:
+        return None
+
+    prices = (1 + portfolio_returns).cumprod()
+    downside = score_downside_volatility(portfolio_returns, spy_returns, risk_free_rate)
+
+    return {
+        "max_drawdown_1y_pct": round(_max_drawdown(prices) * 100, 2),
+        "downside_volatility_score": downside["score"],
+        "downside_details": downside["details"],
+    }
 
 
 # ---------------------------------------------------------------------------

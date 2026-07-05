@@ -105,6 +105,17 @@ class TestDrawdownProfile:
         assert result["score"] >= 65
         assert result["rating"] == "red"
 
+    def test_calibration_matches_documented_curve(self):
+        # A uniform ~10% drawdown should land near 25 (documented mapping),
+        # and ~30% near 75. Ulcer adds a bit on top for sustained drawdowns.
+        dip_10 = _hist([100.0] * 100 + [90.0] * 100)
+        result_10 = rf.score_drawdown_profile(dip_10, dip_10, dip_10)
+        assert 18 <= result_10["score"] <= 35
+
+        dip_30 = _hist([100.0] * 100 + [70.0] * 100)
+        result_30 = rf.score_drawdown_profile(dip_30, dip_30, dip_30)
+        assert 60 <= result_30["score"] <= 85
+
     def test_missing_data(self):
         result = rf.score_drawdown_profile(None, None, None)
         assert 0 <= result["score"] <= 100
@@ -205,11 +216,100 @@ class TestCorrelationRisk:
         result = rf.score_correlation_risk(None, None, None, None, {})
         assert result["score"] == 50
 
+    def test_sector_weight_differentiates_stocks(self):
+        # Same return stream, different sector exposure: the stock in the
+        # dominant sector must score higher than the one in the small sector
+        rng = np.random.RandomState(7)
+        returns = pd.Series(
+            rng.normal(0, 0.01, 120),
+            index=pd.date_range("2025-01-01", periods=120, freq="B"),
+        )
+        weights = {"Technology": 0.7, "Utilities": 0.1}
+        tech = rf.score_correlation_risk(returns, None, None, "Technology", weights)
+        util = rf.score_correlation_risk(returns, None, None, "Utilities", weights)
+        assert tech["score"] > util["score"]
+        assert tech["details"]["same_sector_pct"] == 70.0
+        assert util["details"]["same_sector_pct"] == 10.0
+
+    def test_unknown_sector_is_neutral(self):
+        rng = np.random.RandomState(7)
+        returns = pd.Series(
+            rng.normal(0, 0.01, 120),
+            index=pd.date_range("2025-01-01", periods=120, freq="B"),
+        )
+        result = rf.score_correlation_risk(returns, None, None, None, {})
+        assert result["details"]["same_sector_pct"] is None
+
 
 class TestRegimeSensitivity:
+    def _stock_returns(self, values):
+        return pd.Series(
+            values, index=pd.date_range("2025-01-01", periods=len(values), freq="B")
+        )
+
     def test_insufficient_data_returns_neutral(self):
         result = rf.score_regime_sensitivity(None, None, None)
         assert result["score"] == 50
+
+    def test_calm_market_is_untested_not_safe(self):
+        # No VIX>25 days and no rate spikes in the window: the stock is
+        # untested, so the score must be neutral 50, not 0 (safest)
+        returns = self._stock_returns([0.001] * 100)
+        tnx = self._stock_returns([0.0] * 100)  # zero std → no spike days
+        vix = self._stock_returns([15.0] * 100)  # never above 25
+        result = rf.score_regime_sensitivity(returns, tnx, vix)
+        assert result["score"] == 50
+        assert result["details"]["insufficient_stress_history"] is True
+        assert result["details"]["avg_return_vix_crisis_pct"] is None
+
+    def test_losses_during_vix_crisis_score_high(self):
+        # Stock drops 2% on each of 10 crisis days
+        stock_vals = [0.001] * 100
+        vix_vals = [15.0] * 100
+        for i in range(10, 20):
+            stock_vals[i] = -0.02
+            vix_vals[i] = 30.0
+        returns = self._stock_returns(stock_vals)
+        vix = self._stock_returns(vix_vals)
+        result = rf.score_regime_sensitivity(returns, None, vix)
+        assert result["score"] >= 60
+        assert result["details"]["avg_return_vix_crisis_pct"] == -2.0
+
+    def test_gains_during_crisis_score_low(self):
+        stock_vals = [0.001] * 100
+        vix_vals = [15.0] * 100
+        for i in range(10, 20):
+            stock_vals[i] = 0.01
+            vix_vals[i] = 30.0
+        returns = self._stock_returns(stock_vals)
+        vix = self._stock_returns(vix_vals)
+        result = rf.score_regime_sensitivity(returns, None, vix)
+        assert result["score"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Portfolio-level metrics
+# ---------------------------------------------------------------------------
+class TestPortfolioLevel:
+    def test_insufficient_data_returns_none(self):
+        assert rf.score_portfolio_level(None, None) is None
+        short = pd.Series([0.01] * 5)
+        assert rf.score_portfolio_level(short, None) is None
+
+    def test_diversification_shows_in_portfolio_drawdown(self):
+        # Two anti-correlated streams: each leg has a real drawdown, but the
+        # 50/50 portfolio is nearly flat — portfolio-level metrics must
+        # reflect the hedged stream, not the average of the legs
+        idx = pd.date_range("2025-01-01", periods=100, freq="B")
+        rng = np.random.RandomState(3)
+        leg = rng.normal(0, 0.02, 100)
+        a = pd.Series(leg, index=idx)
+        b = pd.Series(-leg, index=idx)
+        portfolio = (a + b) / 2
+        result = rf.score_portfolio_level(portfolio, None, risk_free_rate=0.04)
+        leg_dd = rf._max_drawdown((1 + a).cumprod()) * 100
+        assert result["max_drawdown_1y_pct"] == 0.0
+        assert leg_dd > 5  # sanity: the individual leg really was risky
 
 
 # ---------------------------------------------------------------------------

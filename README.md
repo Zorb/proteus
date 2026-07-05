@@ -79,7 +79,7 @@ python -m pytest tests/
 
 | Category | Weight | What it measures |
 |---|---|---|
-| Drawdown | 20% | Max drawdown, distance from ATH, Ulcer Index |
+| Drawdown | 20% | Max drawdown, distance from 5y high, Ulcer Index |
 | Downside Volatility | 20% | Sortino ratio, CVaR 5%, down-market beta |
 | Correlation | 15% | SPY correlation, sector concentration |
 | Balance Sheet | 15% | Debt/EBITDA, current ratio, interest coverage |
