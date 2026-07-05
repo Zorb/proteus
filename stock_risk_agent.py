@@ -1,4 +1,4 @@
-import os
+import json
 import time
 import smtplib
 from email.mime.text import MIMEText
@@ -38,6 +38,17 @@ def _retry(func, max_retries=3, base_delay=2, label=""):
     raise last_err
 
 
+def _json_default(obj):
+    """Serialize numpy/pandas scalars cleanly for the Claude prompt."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, (pd.Timestamp, datetime)):
+        return obj.isoformat()
+    return str(obj)
+
+
 class StockRiskAgent:
     def __init__(self):
         """Initialize the Stock Risk Agent"""
@@ -64,7 +75,9 @@ class StockRiskAgent:
                 lambda: yf.Ticker("SPY").history(period="3y"), label="SPY"
             )
             benchmarks["spy_hist"] = spy_hist
-            benchmarks["spy_returns"] = spy_hist["Close"].pct_change().dropna()
+            benchmarks["spy_returns"] = rf.normalize_daily_index(
+                spy_hist["Close"].pct_change().dropna()
+            )
         except Exception as e:
             cprint(f"⚠️ SPY fetch error: {e}", "yellow")
             benchmarks["spy_hist"] = pd.DataFrame()
@@ -75,7 +88,9 @@ class StockRiskAgent:
                 lambda: yf.Ticker("^VIX").history(period="1y"), label="VIX"
             )
             benchmarks["vix_close"] = (
-                vix_hist["Close"] if not vix_hist.empty else pd.Series(dtype=float)
+                rf.normalize_daily_index(vix_hist["Close"])
+                if not vix_hist.empty
+                else pd.Series(dtype=float)
             )
         except Exception as e:
             cprint(f"⚠️ VIX fetch error: {e}", "yellow")
@@ -86,17 +101,22 @@ class StockRiskAgent:
                 lambda: yf.Ticker("^TNX").history(period="1y"), label="TNX"
             )
             if not tnx_hist.empty:
-                benchmarks["tnx_changes"] = tnx_hist["Close"].pct_change().dropna()
+                benchmarks["tnx_changes"] = rf.normalize_daily_index(
+                    tnx_hist["Close"].pct_change().dropna()
+                )
                 benchmarks["risk_free_rate"] = (
                     tnx_hist["Close"].iloc[-1] / 100
                 )  # TNX is in %
+                benchmarks["tnx_available"] = True
             else:
                 benchmarks["tnx_changes"] = pd.Series(dtype=float)
                 benchmarks["risk_free_rate"] = 0.04
+                benchmarks["tnx_available"] = False
         except Exception as e:
             cprint(f"⚠️ TNX fetch error: {e}", "yellow")
             benchmarks["tnx_changes"] = pd.Series(dtype=float)
             benchmarks["risk_free_rate"] = 0.04
+            benchmarks["tnx_available"] = False
 
         cprint("✅ Benchmarks loaded", "green")
         return benchmarks
@@ -113,11 +133,17 @@ class StockRiskAgent:
                 lambda: stock.history(period="max"), label=f"{ticker} max"
             )
 
-            # Recent 1-month for display
-            hist_1mo = hist_1y.tail(22) if len(hist_1y) >= 22 else hist_1y
+            # Recent closes for display (JSON-safe, no Timestamp keys)
+            recent_closes = [
+                {"date": d.strftime("%Y-%m-%d"), "close": round(float(c), 2)}
+                for d, c in hist_1y["Close"].tail(5).items()
+            ]
 
-            # News
-            news = stock.news[:3] if stock.news else []
+            # News (yfinance .news can raise on some tickers)
+            try:
+                news = stock.news[:3] if stock.news else []
+            except Exception:
+                news = []
             news_summary = []
             for n in news:
                 if isinstance(n, dict):
@@ -150,7 +176,7 @@ class StockRiskAgent:
             return {
                 "ticker": ticker,
                 "current_price": current_price,
-                "history_1mo": hist_1mo.tail(5).to_dict(),
+                "recent_closes": recent_closes,
                 "hist_1y": hist_1y,
                 "hist_3y": hist_3y,
                 "hist_max": hist_max,
@@ -204,6 +230,7 @@ class StockRiskAgent:
 
         # Fetch all stock data
         portfolio_data = []
+        skipped_tickers = []
         for _, row in df.iterrows():
             ticker = row["Ticker"]
             cprint(f"🔍 Fetching data for {ticker}...", "cyan")
@@ -212,6 +239,14 @@ class StockRiskAgent:
                 data["position_size"] = row["Position_Size"]
                 data["avg_price"] = row["Avg_Price"]
                 portfolio_data.append(data)
+            else:
+                skipped_tickers.append(ticker)
+
+        if skipped_tickers:
+            cprint(
+                f"⚠️ Excluded from analysis (data fetch failed): {', '.join(skipped_tickers)}",
+                "yellow",
+            )
 
         if not portfolio_data:
             cprint("❌ No data collected", "red")
@@ -248,7 +283,9 @@ class StockRiskAgent:
         weights_dict = {}
         for d in portfolio_data:
             if d["hist_1y"] is not None and len(d["hist_1y"]) > 0:
-                returns_dict[d["ticker"]] = d["hist_1y"]["Close"].pct_change().dropna()
+                returns_dict[d["ticker"]] = rf.normalize_daily_index(
+                    d["hist_1y"]["Close"].pct_change().dropna()
+                )
                 weights_dict[d["ticker"]] = d["position_pct"] / 100
 
         if returns_dict:
@@ -264,11 +301,7 @@ class StockRiskAgent:
         all_scores = []
         for d in portfolio_data:
             ticker = d["ticker"]
-            returns_1y = (
-                d["hist_1y"]["Close"].pct_change().dropna()
-                if d["hist_1y"] is not None and len(d["hist_1y"]) > 0
-                else None
-            )
+            returns_1y = returns_dict.get(ticker)
             spy_ret = benchmarks["spy_returns"]
 
             # Individual metrics
@@ -352,6 +385,8 @@ class StockRiskAgent:
             "portfolio_red_alert": portfolio_red_alert,
             "stocks": all_scores,
         }
+        if skipped_tickers:
+            portfolio_summary["excluded_tickers_data_unavailable"] = skipped_tickers
 
         # Build display data for Claude (raw data subset — no full DataFrames)
         display_data = []
@@ -366,7 +401,7 @@ class StockRiskAgent:
                     "pe_ratio": d["pe_ratio"],
                     "market_cap": d["market_cap"],
                     "sector": d.get("sector"),
-                    "history_1mo": d["history_1mo"],
+                    "recent_closes": d["recent_closes"],
                 }
             )
 
@@ -397,15 +432,15 @@ class StockRiskAgent:
         )
         tnx_current = (
             round(benchmarks["risk_free_rate"] * 100, 2)
-            if benchmarks["risk_free_rate"] != 0.04 or not benchmarks["tnx_changes"].empty
+            if benchmarks["tnx_available"]
             else "unavailable"
         )
         benchmark_str = f"VIX: {vix_current}, 10Y Treasury Yield: {tnx_current}%"
 
-        # Prepare prompt
+        # Prepare prompt (JSON, not str() — numpy scalars repr as np.float64(...) otherwise)
         prompt = config.RISK_PROMPT.format(
-            scores=str(portfolio_summary),
-            data=str(display_data),
+            scores=json.dumps(portfolio_summary, default=_json_default, indent=1),
+            data=json.dumps(display_data, default=_json_default, indent=1),
             polymarket_data=polymarket_str,
             news_sentiment_data=news_str,
             benchmark_data=benchmark_str,
@@ -435,8 +470,12 @@ class StockRiskAgent:
 
             # Extract text block (skip thinking blocks)
             analysis = next(
-                block.text for block in message.content if block.type == "text"
+                (block.text for block in message.content if block.type == "text"),
+                None,
             )
+            if analysis is None:
+                cprint("❌ Claude response contained no text block", "red")
+                return
 
             # Log token usage
             self.log_token_usage(message.usage)
@@ -653,7 +692,11 @@ class StockRiskAgent:
     def job(self):
         """Job to run on schedule"""
         cprint(f"⏰ Running scheduled analysis at {datetime.now()}", "cyan")
-        self.analyze_portfolio()
+        try:
+            self.analyze_portfolio()
+        except Exception as e:
+            # An uncaught exception here would kill the scheduler loop for good
+            cprint(f"❌ Analysis run failed: {e}", "red")
 
     def run(self):
         """Start the scheduler"""

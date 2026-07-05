@@ -1,0 +1,10 @@
+.env
+.git
+.gitignore
+__pycache__/
+*.py[cod]
+.venv/
+portfolio.csv
+tests/
+README.md
+ibkr-setup.txt
