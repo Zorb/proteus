@@ -105,13 +105,19 @@ def _search_earnings_markets(ticker):
                     else:
                         probability = None
 
+                    # Gamma API returns volume as a string — coerce for formatting
+                    try:
+                        volume = float(mkt.get("volume") or 0)
+                    except (TypeError, ValueError):
+                        volume = 0.0
+
                     markets.append(
                         {
                             "question": mkt.get("question", title),
                             "probability": round(probability, 3)
                             if probability is not None
                             else None,
-                            "volume": mkt.get("volume", 0),
+                            "volume": volume,
                             "end_date": mkt.get("endDate", event.get("endDate")),
                             "active": mkt.get("active", True),
                         }

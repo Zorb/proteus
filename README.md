@@ -66,7 +66,14 @@ docker-compose up -d --build
 python stock_risk_agent.py
 ```
 
-Runs once at startup, then daily at the scheduled time (default 08:00, configurable in `config.py`).
+Runs once at startup, then daily at the scheduled time (default 08:00, configurable via the `SCHEDULE_TIME` env variable, 24h format).
+
+### 4. Tests
+
+```bash
+pip install pytest
+python -m pytest tests/
+```
 
 ## Risk categories
 

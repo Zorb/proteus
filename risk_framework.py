@@ -15,6 +15,25 @@ def _clamp(value, lo=0, hi=100):
     return max(lo, min(hi, value))
 
 
+def normalize_daily_index(series):
+    """Strip timezone and time-of-day from a daily series index.
+
+    yfinance returns tz-aware timestamps in each exchange's local zone, so
+    series from different markets (e.g. SPY vs an LSE stock) never share exact
+    timestamps and silently align to an empty frame. Normalizing to naive
+    dates makes cross-market correlation/beta calculations work.
+    """
+    if series is None or len(series) == 0:
+        return series
+    idx = series.index
+    if isinstance(idx, pd.DatetimeIndex):
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        series = series.copy()
+        series.index = idx.normalize()
+    return series
+
+
 def _rating(score):
     if score < 35:
         return "green"
@@ -33,7 +52,7 @@ def _max_drawdown(prices):
 
 
 def _ulcer_index(prices, window=14):
-    """Ulcer Index: RMS of percentage drawdowns over rolling window."""
+    """Ulcer Index: RMS over a rolling window of percentage drawdowns from the running peak."""
     if prices is None or len(prices) < window:
         return 0.0
     cummax = prices.expanding().max()

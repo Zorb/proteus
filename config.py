@@ -25,10 +25,6 @@ EMAIL_TO = os.getenv("EMAIL_TO")  # comma-separated for multiple recipients
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_KEY")
 MODEL_NAME = "claude-opus-4-6"
 
-# Notion Configuration
-NOTION_KEY = os.getenv("NOTION_KEY")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
-
 # Interactive Brokers Flex Query Configuration
 IBKR_FLEX_TOKEN = os.getenv("IBKR_FLEX_TOKEN")
 IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
@@ -37,7 +33,7 @@ IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
 ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 
 # Schedule Configuration
-SCHEDULE_TIME = "08:00"  # Time to run daily analysis (24h format)
+SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "08:00")  # Time to run daily analysis (24h format)
 
 # Risk Analysis Prompt
 RISK_PROMPT = """
