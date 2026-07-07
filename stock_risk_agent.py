@@ -442,12 +442,12 @@ class StockRiskAgent:
                 }
             )
 
-        # Fetch Polymarket earnings data
-        cprint("🎰 Fetching Polymarket earnings data...", "cyan")
+        # Fetch Polymarket earnings data (skipped — Gamma API unreachable 2026-04-08)
         tickers = [d["ticker"] for d in portfolio_data]
-        polymarket_results = sentiment.fetch_polymarket_earnings(tickers)
-        polymarket_str = sentiment.format_polymarket_data(polymarket_results)
-        cprint("✅ Polymarket data loaded", "green")
+        # polymarket_results = sentiment.fetch_polymarket_earnings(tickers)
+        # polymarket_str = sentiment.format_polymarket_data(polymarket_results)
+        polymarket_str = "Polymarket data unavailable."
+        cprint("⏭️ Polymarket skipped (API unreachable)", "yellow")
 
         # Fetch Alpha Vantage news sentiment
         cprint("📰 Fetching news sentiment...", "cyan")
@@ -495,8 +495,7 @@ class StockRiskAgent:
                     max_tokens=16000,
                     temperature=1,  # required for extended thinking
                     thinking={
-                        "type": "enabled",
-                        "budget_tokens": 10000,
+                        "type": "adaptive",
                     },
                     messages=[{"role": "user", "content": prompt}],
                 ),
@@ -753,5 +752,10 @@ class StockRiskAgent:
 
 
 if __name__ == "__main__":
+    import sys
+
     agent = StockRiskAgent()
-    agent.run()
+    if "--loop" in sys.argv:
+        agent.run()  # internal scheduler (Docker deployment)
+    else:
+        agent.job()  # one-shot (systemd timer deployment)
