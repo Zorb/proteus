@@ -8,6 +8,17 @@ monitor's reliability.
 **Non-goals:** trade execution, buy/sell recommendations presented as advice, real-time
 screening, intraday data.
 
+**Status:** not started. Decision 2026-07-07: build in this repo (not a new project) — Scout
+reuses `risk_framework`, `portfolio_sync`, `sentiment`, `_retry`, and the same `.env`.
+
+**Deployment note (2026-07-07):** the repo's reference deployment is Docker Compose, but
+ubuntu-main runs via systemd instead (`proteus.service` + `proteus.timer`, weekdays 08:00 UTC;
+`stock_risk_agent.py` with no args is one-shot, `--loop` runs the internal scheduler). For
+Phase 3 on this host, add `proteus-scout.service` + `proteus-scout.timer`
+(`OnCalendar=Sun 17:00`) instead of a second compose service — `SCOUT_SCHEDULE` /
+`SCOUT_RUN_ON_START` are then unnecessary. Scout's entrypoint should follow the same
+one-shot-by-default convention.
+
 ---
 
 ## Architecture
