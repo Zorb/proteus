@@ -1,8 +1,8 @@
 [Unit]
-Description=Run Proteus on weekdays at 08:00 UTC
+Description=Run Proteus on Monday and Friday mornings at 08:00 UTC
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 08:00:00
+OnCalendar=Mon,Fri *-*-* 08:00:00
 Persistent=true
 
 [Install]
