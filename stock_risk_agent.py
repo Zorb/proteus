@@ -1,4 +1,5 @@
 import json
+import math
 import time
 import smtplib
 from email.mime.text import MIMEText
@@ -13,8 +14,14 @@ from telegram import Bot
 from termcolor import colored, cprint
 import config
 import risk_framework as rf
+import actions
 import sentiment
 import portfolio_sync
+
+# Single source for report colors — used by the score badges and the
+# Entry/P&L/Action cells alike
+RATING_COLORS = {"green": "#27ae60", "yellow": "#f39c12", "red": "#e74c3c"}
+MUTED_COLOR = "#999"
 from datetime import datetime
 
 
@@ -175,6 +182,7 @@ class StockRiskAgent:
 
             return {
                 "ticker": ticker,
+                "currency": currency,
                 "current_price": current_price,
                 "recent_closes": recent_closes,
                 "hist_1y": hist_1y,
@@ -237,7 +245,13 @@ class StockRiskAgent:
             data = self.fetch_data(ticker)
             if data:
                 data["position_size"] = row["Position_Size"]
-                data["avg_price"] = row["Avg_Price"]
+                avg_price = row["Avg_Price"]
+                # LSE quotes are GBp (pence): fetch_data converts current_price
+                # to pounds, and IBKR/CSV entry prices arrive in pence too —
+                # convert so P&L compares like units
+                if data.get("currency") == "GBp" and avg_price:
+                    avg_price = avg_price / 100
+                data["avg_price"] = avg_price
                 portfolio_data.append(data)
             else:
                 skipped_tickers.append(ticker)
@@ -308,6 +322,7 @@ class StockRiskAgent:
         # Score each stock
         cprint("🧮 Computing risk scores...", "magenta")
         all_scores = []
+        display_data = []
         for d in portfolio_data:
             ticker = d["ticker"]
             returns_1y = returns_dict.get(ticker)
@@ -379,18 +394,55 @@ class StockRiskAgent:
             }
             composite = rf.calculate_composite(scores)
 
+            # Entry-aware action layer — risk score stays forward-looking,
+            # this only suggests partial exits from unrealized P&L + rating
+            pnl_pct = actions.unrealized_pnl_pct(d["current_price"], d["avg_price"])
+            action = actions.evaluate_position_action(
+                pnl_pct,
+                composite["rating"],
+                config.ACTION_TP_LADDER,
+                config.ACTION_CL_LADDER,
+                red_tp_cap=config.ACTION_RED_TP_CAP,
+                red_cl_cap=config.ACTION_RED_CL_CAP,
+            )
+
             stock_scores = {
                 "ticker": ticker,
                 "position_pct": round(d["position_pct"], 1),
+                "position_size": d["position_size"],
                 "current_price": d["current_price"],
+                "avg_price": d["avg_price"],
+                "unrealized_pnl_pct": round(pnl_pct, 1) if pnl_pct is not None else None,
+                "action": action["action"],
+                "trim_pct": action["trim_pct"],
+                "action_reason": action["reason"],
                 "scores": scores,
                 "composite": composite,
             }
             all_scores.append(stock_scores)
+            # Raw-data subset for the prompt's {data} slot; action fields live
+            # only on the scores entry so the prompt carries them once
+            display_data.append(
+                {
+                    "ticker": ticker,
+                    "current_price": d["current_price"],
+                    "position_pct": round(d["position_pct"], 1),
+                    "news": d["news"],
+                    "pe_ratio": d["pe_ratio"],
+                    "market_cap": d["market_cap"],
+                    "sector": d.get("sector"),
+                    "recent_closes": d["recent_closes"],
+                }
+            )
             cprint(
                 f"  {ticker}: composite {composite['composite_score']} ({composite['rating']})",
                 "cyan",
             )
+            if action["action"] in ("take_profit_candidate", "cut_loss_candidate"):
+                cprint(
+                    f"    ↳ {action['action']}: trim {action['trim_pct']:g}% — {action['reason']}",
+                    "yellow",
+                )
 
         # Portfolio composite (weighted average of stock composites by position %)
         portfolio_composite = sum(
@@ -425,29 +477,7 @@ class StockRiskAgent:
         if skipped_tickers:
             portfolio_summary["excluded_tickers_data_unavailable"] = skipped_tickers
 
-        # Build display data for Claude (raw data subset — no full DataFrames)
-        display_data = []
-        for d in portfolio_data:
-            display_data.append(
-                {
-                    "ticker": d["ticker"],
-                    "current_price": d["current_price"],
-                    "position_size": d["position_size"],
-                    "position_pct": round(d["position_pct"], 1),
-                    "news": d["news"],
-                    "pe_ratio": d["pe_ratio"],
-                    "market_cap": d["market_cap"],
-                    "sector": d.get("sector"),
-                    "recent_closes": d["recent_closes"],
-                }
-            )
-
-        # Fetch Polymarket earnings data
-        cprint("🎰 Fetching Polymarket earnings data...", "cyan")
         tickers = [d["ticker"] for d in portfolio_data]
-        polymarket_results = sentiment.fetch_polymarket_earnings(tickers)
-        polymarket_str = sentiment.format_polymarket_data(polymarket_results)
-        cprint("✅ Polymarket data loaded", "green")
 
         # Fetch Alpha Vantage news sentiment
         cprint("📰 Fetching news sentiment...", "cyan")
@@ -478,7 +508,6 @@ class StockRiskAgent:
         prompt = config.RISK_PROMPT.format(
             scores=json.dumps(portfolio_summary, default=_json_default, indent=1),
             data=json.dumps(display_data, default=_json_default, indent=1),
-            polymarket_data=polymarket_str,
             news_sentiment_data=news_str,
             benchmark_data=benchmark_str,
         )
@@ -495,8 +524,7 @@ class StockRiskAgent:
                     max_tokens=16000,
                     temperature=1,  # required for extended thinking
                     thinking={
-                        "type": "enabled",
-                        "budget_tokens": 10000,
+                        "type": "adaptive",
                     },
                     messages=[{"role": "user", "content": prompt}],
                 ),
@@ -591,21 +619,41 @@ class StockRiskAgent:
         if portfolio_summary and "stocks" in portfolio_summary:
             composite = portfolio_summary.get("portfolio_composite_score", 0)
             rating = portfolio_summary.get("portfolio_rating", "green")
-            badge_color = {
-                "green": "#27ae60",
-                "yellow": "#f39c12",
-                "red": "#e74c3c",
-            }.get(rating, "#999")
+            badge_color = RATING_COLORS.get(rating, MUTED_COLOR)
 
             rows = ""
             for stock in portfolio_summary["stocks"]:
                 s_rating = stock["composite"]["rating"]
-                s_color = {
-                    "green": "#27ae60",
-                    "yellow": "#f39c12",
-                    "red": "#e74c3c",
-                }.get(s_rating, "#999")
+                s_color = RATING_COLORS.get(s_rating, MUTED_COLOR)
                 s_score = stock["composite"]["composite_score"]
+
+                avg = stock.get("avg_price")
+                has_avg = (
+                    avg is not None
+                    and not (isinstance(avg, float) and math.isnan(avg))
+                    and avg > 0
+                )
+                entry_cell = f"{avg:,.2f}" if has_avg else "–"
+                pnl = stock.get("unrealized_pnl_pct")
+                if pnl is None:
+                    pnl_cell = f'<span style="color: {MUTED_COLOR};">–</span>'
+                else:
+                    pnl_color = (
+                        RATING_COLORS["green"]
+                        if pnl > 0
+                        else RATING_COLORS["red"] if pnl < 0 else MUTED_COLOR
+                    )
+                    pnl_cell = f'<span style="color: {pnl_color}; font-weight: bold;">{pnl:+.1f}%</span>'
+                act = stock.get("action")
+                trim = stock.get("trim_pct", 0)
+                act_label = actions.action_label(act, trim, stock.get("position_size"))
+                if act == "take_profit_candidate":
+                    act_cell = f'<span style="color: {RATING_COLORS["green"]}; font-weight: bold;">{act_label}</span>'
+                elif act == "cut_loss_candidate":
+                    act_cell = f'<span style="color: {RATING_COLORS["red"]}; font-weight: bold;">{act_label}</span>'
+                else:
+                    act_cell = f'<span style="color: {MUTED_COLOR};">{act_label}</span>'
+
                 rows += f"""
                 <tr>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #eee; font-weight: bold;">{stock["ticker"]}</td>
@@ -613,6 +661,9 @@ class StockRiskAgent:
                         <span style="background: {s_color}; color: white; padding: 2px 10px; border-radius: 12px; font-size: 13px;">{s_score}/100</span>
                     </td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{stock["position_pct"]}%</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{entry_cell}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{pnl_cell}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: center;">{act_cell}</td>
                 </tr>"""
 
             risk_table = f"""
@@ -626,6 +677,9 @@ class StockRiskAgent:
                         <th style="padding: 8px 12px; text-align: left; border-bottom: 2px solid #ddd;">Ticker</th>
                         <th style="padding: 8px 12px; text-align: center; border-bottom: 2px solid #ddd;">Risk Score</th>
                         <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">Weight</th>
+                        <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">Entry</th>
+                        <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">P&amp;L</th>
+                        <th style="padding: 8px 12px; text-align: center; border-bottom: 2px solid #ddd;">Action</th>
                     </tr>
                     {rows}
                 </table>
@@ -726,14 +780,18 @@ class StockRiskAgent:
         except Exception as e:
             cprint(f"❌ Telegram Async Error: {e}", "red")
 
-    def job(self):
+    def job(self, reraise=False):
         """Job to run on schedule"""
         cprint(f"⏰ Running scheduled analysis at {datetime.now()}", "cyan")
         try:
             self.analyze_portfolio()
         except Exception as e:
-            # An uncaught exception here would kill the scheduler loop for good
+            # An uncaught exception here would kill the scheduler loop for good;
+            # the one-shot systemd path passes reraise=True so a failed run
+            # exits nonzero and the unit is marked failed instead of green
             cprint(f"❌ Analysis run failed: {e}", "red")
+            if reraise:
+                raise
 
     def run(self):
         """Start the scheduler"""
@@ -753,5 +811,10 @@ class StockRiskAgent:
 
 
 if __name__ == "__main__":
+    import sys
+
     agent = StockRiskAgent()
-    agent.run()
+    if "--loop" in sys.argv:
+        agent.run()  # internal scheduler (Docker deployment)
+    else:
+        agent.job(reraise=True)  # one-shot (systemd timer deployment)

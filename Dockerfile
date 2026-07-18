@@ -15,4 +15,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Run the agent
-CMD ["python", "stock_risk_agent.py"]
+CMD ["python", "stock_risk_agent.py", "--loop"]
