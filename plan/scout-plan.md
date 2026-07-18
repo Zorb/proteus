@@ -144,7 +144,7 @@ monitor; the weekly email arrives with N candidates, each citing real cached num
 
 - Track suggested-before candidates (small JSON state file) so the report says "new this
   week" vs "still ranked".
-- Polymarket earnings odds for finalists.
+- ~~Polymarket earnings odds for finalists.~~ (Polymarket removed from Proteus 2026-07-18 — API unreachable, judged not useful; do not re-add.)
 - A `--once` CLI flag on both agents for manual runs.
 - CI: GitHub Action running `pytest` on PRs (the repo has none today).
 

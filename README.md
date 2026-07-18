@@ -1,13 +1,13 @@
 # Proteus
 
-AI-powered stock portfolio risk monitor. Runs daily, scores your holdings across 7 risk categories, enriches with prediction market and news sentiment data, and delivers a plain-language briefing via email or Telegram.
+AI-powered stock portfolio risk monitor. Runs on a schedule, scores your holdings across 7 risk categories, suggests partial take-profit/cut-loss actions from your entry prices, enriches with news sentiment, and delivers a plain-language briefing via email or Telegram.
 
 ## How it works
 
 1. Loads your portfolio from Interactive Brokers (or a CSV fallback)
 2. Fetches price history, fundamentals, and news from Yahoo Finance
 3. Scores each stock 0-100 across 7 risk categories (drawdown, volatility, liquidity, balance sheet, correlation, concentration, regime sensitivity)
-4. Pulls Polymarket earnings predictions and Alpha Vantage news sentiment
+4. Computes partial take-profit / cut-loss suggestions from entry price and pulls Alpha Vantage news sentiment
 5. Sends everything to Claude (Opus 4.6 + extended thinking) for interpretation
 6. Delivers a concise report via email, Telegram, or both
 
@@ -40,6 +40,10 @@ ALPHAVANTAGE_API_KEY=your_key
 # Optional: Interactive Brokers portfolio sync
 IBKR_FLEX_TOKEN=your_token
 IBKR_FLEX_QUERY_ID=your_query_id
+
+# Optional: take-profit / cut-loss ladders ("pnl_threshold:trim_pct,...")
+ACTION_TP_LADDER=25:25,50:50
+ACTION_CL_LADDER=-8:50,-15:100
 ```
 
 ### 2. Portfolio
@@ -89,9 +93,12 @@ python -m pytest tests/
 
 Each scored 0-100. Green (0-35), Yellow (35-65), Red (65-100). A red alert triggers if a position of at least 5% of the portfolio (configurable via `ALERT_MIN_POSITION_PCT`) has a category above 80 or goes red overall, or if the portfolio composite exceeds 65. Smaller positions can be individually red without flagging the whole portfolio.
 
+## Action suggestions
+
+Separately from the risk score (which stays forward-looking), each position gets a deterministic partial take-profit / cut-loss suggestion based on unrealized P&L from entry. Fixed ladders pick a base tier — `ACTION_TP_LADDER` (default `25:25,50:50`: at +25% gain trim 25% of the position, at +50% trim 50%) and `ACTION_CL_LADDER` (default `-8:50,-15:100`: at −8% cut half, at −15% exit) — then the risk rating shifts the suggestion one tier: red escalates, green softens (a tier-1 signal on a green stock downgrades to hold), yellow keeps the base. Suggestions are candidates, not orders; Claude addresses each one in the report. Stateless: a standing suggestion repeats each run until acted on.
+
 ## Data sources
 
 - **Yahoo Finance** — price history, fundamentals, news
-- **Polymarket** — earnings prediction probabilities (free, no auth)
 - **Alpha Vantage** — AI-scored news sentiment from 50+ outlets (free API key)
 - **Interactive Brokers** — live portfolio positions via Flex Query (optional)

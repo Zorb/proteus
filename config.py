@@ -1,6 +1,8 @@
 import os
 from dotenv import load_dotenv
 
+import actions
+
 # Load environment variables
 load_dotenv()
 
@@ -36,12 +38,21 @@ ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 # Positions below this % of the portfolio can't trigger a portfolio-wide red alert
 ALERT_MIN_POSITION_PCT = float(os.getenv("ALERT_MIN_POSITION_PCT", "5"))
 
+# Action ladders: "pnl_threshold:trim_pct,..." — parsed at startup so a
+# malformed .env fails loudly here, not mid-run
+ACTION_TP_LADDER = actions.parse_ladder(
+    os.getenv("ACTION_TP_LADDER", "25:25,50:50"), kind="gain"
+)
+ACTION_CL_LADDER = actions.parse_ladder(
+    os.getenv("ACTION_CL_LADDER", "-8:50,-15:100"), kind="loss"
+)
+
 # Schedule Configuration
 SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "08:00")  # Time to run daily analysis (24h format)
 
 # Risk Analysis Prompt
 RISK_PROMPT = """
-You are a financial analyst writing a daily briefing for a growth-oriented portfolio. You are given pre-calculated quantitative risk scores, raw market data, prediction market odds, and news sentiment.
+You are a financial analyst writing a daily briefing for a growth-oriented portfolio. You are given pre-calculated quantitative risk scores, raw market data with entry prices and unrealized P&L, deterministic take-profit/cut-loss suggestions, and news sentiment.
 
 QUANTITATIVE RISK SCORES:
 {scores}
@@ -52,9 +63,6 @@ RAW MARKET DATA:
 BENCHMARK DATA:
 {benchmark_data}
 
-PREDICTION MARKET DATA (Polymarket):
-{polymarket_data}
-
 NEWS SENTIMENT DATA (Alpha Vantage):
 {news_sentiment_data}
 
@@ -64,7 +72,7 @@ SCORING REFERENCE:
 - Red Alert triggers when a position of meaningful size (at least 5% of the portfolio by default) goes red, or the portfolio composite exceeds 65. Smaller positions can be individually red without triggering a portfolio alert — still mention them, but don't lead with them.
 - Categories and weights: Drawdown (20%), Downside Volatility (20%), Correlation (15%), Balance Sheet (15%), Liquidity (10%), Concentration (10%), Regime Sensitivity (10%)
 - portfolio_level_metrics shows risk computed on the aggregated portfolio return stream (captures diversification the per-stock average cannot). sector_hhi measures sector concentration (near 1/number-of-sectors = diversified, 1.0 = single sector).
-- Polymarket shows market-implied earnings odds. Weight these more than news sentiment when they conflict.
+- Each stock carries action / trim_pct / action_reason: a deterministic partial take-profit or cut-loss suggestion from fixed unrealized-P&L tiers, shifted one tier by the risk rating (red harder, green softer). These are candidates, not orders — your job is judgment on top: endorse the trim size or push back, always citing a number.
 - Alpha Vantage sentiment ranges from -0.35 (bearish) to +0.35 (bullish).
 - If data is missing for a source, skip it. Do not fabricate.
 
@@ -88,13 +96,13 @@ OVERVIEW
 Portfolio risk score: [X]/100 ([rating]). Total value: $[X]. VIX is at [X] and the 10Y yield is [X]%. Biggest concern across the portfolio: [category] averaging [X]/100.
 
 [TICKER] - [score]/100
-[2-3 plain sentences. What is happening with this stock right now? Cite the price, the worst risk category and its score, any notable P/E or drawdown numbers, and sentiment if available. Keep it natural.]
+[2-3 plain sentences. What is happening with this stock right now? Cite the price, the unrealized P&L from entry, the worst risk category and its score, any notable P/E or drawdown numbers, and sentiment if available. If the stock is a take_profit_candidate or cut_loss_candidate, address the suggested trim explicitly — endorse it or argue against it with a number. Keep it natural.]
 
 [TICKER] - [score]/100
 [Same format, repeat for each stock.]
 
 WHAT TO DO
-1. [Specific action with reasoning and the numbers behind it]
+1. [Specific action with reasoning and the numbers behind it. Lead with any take-profit or cut-loss candidates, naming the suggested trim size — or your amended size if you disagree.]
 2. [Another action]
 3. [Optional third action if warranted]
 """

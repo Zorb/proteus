@@ -13,6 +13,7 @@ from telegram import Bot
 from termcolor import colored, cprint
 import config
 import risk_framework as rf
+import actions
 import sentiment
 import portfolio_sync
 from datetime import datetime
@@ -379,10 +380,29 @@ class StockRiskAgent:
             }
             composite = rf.calculate_composite(scores)
 
+            # Entry-aware action layer — risk score stays forward-looking,
+            # this only suggests partial exits from unrealized P&L + rating
+            pnl_pct = actions.unrealized_pnl_pct(d["current_price"], d["avg_price"])
+            action = actions.evaluate_position_action(
+                pnl_pct,
+                composite["rating"],
+                config.ACTION_TP_LADDER,
+                config.ACTION_CL_LADDER,
+            )
+            d["unrealized_pnl_pct"] = (
+                round(pnl_pct, 1) if pnl_pct is not None else None
+            )
+            d["action"] = action
+
             stock_scores = {
                 "ticker": ticker,
                 "position_pct": round(d["position_pct"], 1),
                 "current_price": d["current_price"],
+                "avg_price": d["avg_price"],
+                "unrealized_pnl_pct": d["unrealized_pnl_pct"],
+                "action": action["action"],
+                "trim_pct": action["trim_pct"],
+                "action_reason": action["reason"],
                 "scores": scores,
                 "composite": composite,
             }
@@ -391,6 +411,11 @@ class StockRiskAgent:
                 f"  {ticker}: composite {composite['composite_score']} ({composite['rating']})",
                 "cyan",
             )
+            if action["action"] in ("take_profit_candidate", "cut_loss_candidate"):
+                cprint(
+                    f"    ↳ {action['action']}: trim {action['trim_pct']:g}% — {action['reason']}",
+                    "yellow",
+                )
 
         # Portfolio composite (weighted average of stock composites by position %)
         portfolio_composite = sum(
@@ -432,6 +457,10 @@ class StockRiskAgent:
                 {
                     "ticker": d["ticker"],
                     "current_price": d["current_price"],
+                    "avg_price": d["avg_price"],
+                    "unrealized_pnl_pct": d.get("unrealized_pnl_pct"),
+                    "action": d["action"]["action"],
+                    "trim_pct": d["action"]["trim_pct"],
                     "position_size": d["position_size"],
                     "position_pct": round(d["position_pct"], 1),
                     "news": d["news"],
@@ -442,12 +471,7 @@ class StockRiskAgent:
                 }
             )
 
-        # Fetch Polymarket earnings data (skipped — Gamma API unreachable 2026-04-08)
         tickers = [d["ticker"] for d in portfolio_data]
-        # polymarket_results = sentiment.fetch_polymarket_earnings(tickers)
-        # polymarket_str = sentiment.format_polymarket_data(polymarket_results)
-        polymarket_str = "Polymarket data unavailable."
-        cprint("⏭️ Polymarket skipped (API unreachable)", "yellow")
 
         # Fetch Alpha Vantage news sentiment
         cprint("📰 Fetching news sentiment...", "cyan")
@@ -478,7 +502,6 @@ class StockRiskAgent:
         prompt = config.RISK_PROMPT.format(
             scores=json.dumps(portfolio_summary, default=_json_default, indent=1),
             data=json.dumps(display_data, default=_json_default, indent=1),
-            polymarket_data=polymarket_str,
             news_sentiment_data=news_str,
             benchmark_data=benchmark_str,
         )
@@ -605,6 +628,25 @@ class StockRiskAgent:
                     "red": "#e74c3c",
                 }.get(s_rating, "#999")
                 s_score = stock["composite"]["composite_score"]
+
+                avg = stock.get("avg_price")
+                entry_cell = f"{avg:,.2f}" if avg else "–"
+                pnl = stock.get("unrealized_pnl_pct")
+                if pnl is None:
+                    pnl_cell = '<span style="color: #999;">–</span>'
+                else:
+                    pnl_color = "#27ae60" if pnl >= 0 else "#e74c3c"
+                    pnl_cell = f'<span style="color: {pnl_color}; font-weight: bold;">{pnl:+.1f}%</span>'
+                act = stock.get("action")
+                trim = stock.get("trim_pct", 0)
+                if act == "take_profit_candidate":
+                    act_cell = f'<span style="color: #27ae60; font-weight: bold;">Trim {trim:g}%</span>'
+                elif act == "cut_loss_candidate":
+                    act_label = "Exit" if trim >= 100 else f"Cut {trim:g}%"
+                    act_cell = f'<span style="color: #e74c3c; font-weight: bold;">{act_label}</span>'
+                else:
+                    act_cell = '<span style="color: #999;">–</span>'
+
                 rows += f"""
                 <tr>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #eee; font-weight: bold;">{stock["ticker"]}</td>
@@ -612,6 +654,9 @@ class StockRiskAgent:
                         <span style="background: {s_color}; color: white; padding: 2px 10px; border-radius: 12px; font-size: 13px;">{s_score}/100</span>
                     </td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{stock["position_pct"]}%</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{entry_cell}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{pnl_cell}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: center;">{act_cell}</td>
                 </tr>"""
 
             risk_table = f"""
@@ -625,6 +670,9 @@ class StockRiskAgent:
                         <th style="padding: 8px 12px; text-align: left; border-bottom: 2px solid #ddd;">Ticker</th>
                         <th style="padding: 8px 12px; text-align: center; border-bottom: 2px solid #ddd;">Risk Score</th>
                         <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">Weight</th>
+                        <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">Entry</th>
+                        <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">P&amp;L</th>
+                        <th style="padding: 8px 12px; text-align: center; border-bottom: 2px solid #ddd;">Action</th>
                     </tr>
                     {rows}
                 </table>
