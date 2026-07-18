@@ -11,8 +11,16 @@ trim the position shrinks but avg price doesn't, so a standing suggestion
 simply repeats at the twice-weekly cadence.
 """
 
-# Escalation cap when red risk pushes past the top take-profit tier
+import math
+
+# Default escalation caps when red risk pushes past the top ladder tier
+# (overridable via ACTION_RED_TP_CAP / ACTION_RED_CL_CAP, see config.py)
 RED_TOP_TP_TRIM = 75.0
+RED_TOP_CL_TRIM = 100.0
+
+
+def _is_missing(value):
+    return value is None or (isinstance(value, float) and math.isnan(value))
 
 
 def unrealized_pnl_pct(current_price, avg_price):
@@ -20,9 +28,10 @@ def unrealized_pnl_pct(current_price, avg_price):
 
     None (not 0) when entry is missing or the live price failed to fetch —
     downstream fallbacks substitute avg_price for a missing live price, which
-    would otherwise fake a flat 0%.
+    would otherwise fake a flat 0%. Missing values arrive as None (IBKR path)
+    or NaN (blank CSV cells via pandas), so both are treated as absent.
     """
-    if current_price is None or avg_price is None:
+    if _is_missing(current_price) or _is_missing(avg_price):
         return None
     if avg_price <= 0 or current_price <= 0:
         return None
@@ -77,11 +86,19 @@ def _crossed_index(pnl_pct, ladder, kind):
     return idx
 
 
-def evaluate_position_action(pnl_pct, rating, tp_ladder, cl_ladder):
+def evaluate_position_action(
+    pnl_pct,
+    rating,
+    tp_ladder,
+    cl_ladder,
+    red_tp_cap=RED_TOP_TP_TRIM,
+    red_cl_cap=RED_TOP_CL_TRIM,
+):
     """Suggest a partial exit for one position.
 
     Returns {"action", "trim_pct", "reason"}. Actions: take_profit_candidate /
     cut_loss_candidate (with trim_pct of the current position), hold, no_data.
+    red_tp_cap / red_cl_cap bound the red-risk escalation past the top tier.
     """
     if pnl_pct is None:
         return {
@@ -112,7 +129,8 @@ def evaluate_position_action(pnl_pct, rating, tp_ladder, cl_ladder):
         if idx + 1 < len(ladder):
             trim = ladder[idx + 1][1]
         else:
-            trim = 100.0 if kind == "loss" else max(base_trim, RED_TOP_TP_TRIM)
+            cap = red_cl_cap if kind == "loss" else red_tp_cap
+            trim = max(base_trim, cap)
         reason = f"{base}; red risk escalates to {trim:g}%"
     elif rating == "green":
         if idx == 0:
@@ -128,3 +146,13 @@ def evaluate_position_action(pnl_pct, rating, tp_ladder, cl_ladder):
         reason = f"{base}; {rating} risk keeps base tier"
 
     return {"action": action, "trim_pct": trim, "reason": reason}
+
+
+def action_label(action, trim_pct):
+    """Human-readable label for an action — the single rendering source shared
+    by every surface (email table, and any future console/Telegram view)."""
+    if action == "take_profit_candidate":
+        return f"Trim {trim_pct:g}%"
+    if action == "cut_loss_candidate":
+        return "Exit" if trim_pct >= 100 else f"Cut {trim_pct:g}%"
+    return "–"

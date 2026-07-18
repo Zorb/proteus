@@ -44,6 +44,9 @@ IBKR_FLEX_QUERY_ID=your_query_id
 # Optional: take-profit / cut-loss ladders ("pnl_threshold:trim_pct,...")
 ACTION_TP_LADDER=25:25,50:50
 ACTION_CL_LADDER=-8:50,-15:100
+# Red-risk escalation caps past the top tier
+ACTION_RED_TP_CAP=75
+ACTION_RED_CL_CAP=100
 ```
 
 ### 2. Portfolio
@@ -65,12 +68,13 @@ To sync automatically from Interactive Brokers instead, see [ibkr-setup.txt](ibk
 docker-compose up -d --build
 ```
 
-**Local:**
+**Local / systemd:**
 ```bash
-python stock_risk_agent.py
+python stock_risk_agent.py          # one-shot: run once and exit (systemd timer mode)
+python stock_risk_agent.py --loop   # internal scheduler: run now, then daily at SCHEDULE_TIME
 ```
 
-Runs once at startup, then daily at the scheduled time (default 08:00, configurable via the `SCHEDULE_TIME` env variable, 24h format).
+The Docker image uses `--loop` (daily at `SCHEDULE_TIME`, default 08:00). The systemd deployment (`proteus.service` + `proteus.timer`) uses one-shot mode on the timer's schedule (Mon+Fri 08:00); a failed one-shot run exits nonzero so the unit shows as failed.
 
 ### 4. Tests
 

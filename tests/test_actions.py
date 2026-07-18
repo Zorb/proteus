@@ -31,6 +31,14 @@ def test_pnl_none_when_data_missing():
     assert actions.unrealized_pnl_pct(0, 100.0) is None
 
 
+def test_pnl_none_on_nan():
+    # pandas represents blank CSV cells as NaN, which is neither None nor <= 0
+    nan = float("nan")
+    assert actions.unrealized_pnl_pct(nan, 100.0) is None
+    assert actions.unrealized_pnl_pct(100.0, nan) is None
+    assert actions.unrealized_pnl_pct(nan, nan) is None
+
+
 # ---------------------------------------------------------------------------
 # parse_ladder
 # ---------------------------------------------------------------------------
@@ -147,6 +155,32 @@ def test_green_tier1_downgrades_to_hold():
 def test_yellow_keeps_base_tier():
     assert evaluate(30.0, "yellow")["trim_pct"] == 25.0
     assert evaluate(-10.0, "yellow")["trim_pct"] == 50.0
+
+
+def test_custom_escalation_caps():
+    result = actions.evaluate_position_action(
+        60.0, "red", TP, CL, red_tp_cap=90.0, red_cl_cap=100.0
+    )
+    assert result["trim_pct"] == 90.0
+    # partial cut-loss ladder with a non-exit cap stays partial under red
+    partial_cl = actions.parse_ladder("-8:25,-15:60", kind="loss")
+    result = actions.evaluate_position_action(
+        -20.0, "red", TP, partial_cl, red_cl_cap=60.0
+    )
+    assert result["trim_pct"] == 60.0
+
+
+# ---------------------------------------------------------------------------
+# action_label
+# ---------------------------------------------------------------------------
+
+
+def test_action_label():
+    assert actions.action_label("take_profit_candidate", 25.0) == "Trim 25%"
+    assert actions.action_label("cut_loss_candidate", 50.0) == "Cut 50%"
+    assert actions.action_label("cut_loss_candidate", 100.0) == "Exit"
+    assert actions.action_label("hold", 0) == "–"
+    assert actions.action_label("no_data", 0) == "–"
 
 
 # ---------------------------------------------------------------------------

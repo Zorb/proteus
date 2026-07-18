@@ -39,20 +39,24 @@ ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
 ALERT_MIN_POSITION_PCT = float(os.getenv("ALERT_MIN_POSITION_PCT", "5"))
 
 # Action ladders: "pnl_threshold:trim_pct,..." — parsed at startup so a
-# malformed .env fails loudly here, not mid-run
+# malformed .env fails loudly here, not mid-run. `or` (not a getenv default)
+# so a present-but-blank var also falls back instead of crashing at import.
 ACTION_TP_LADDER = actions.parse_ladder(
-    os.getenv("ACTION_TP_LADDER", "25:25,50:50"), kind="gain"
+    os.getenv("ACTION_TP_LADDER") or "25:25,50:50", kind="gain"
 )
 ACTION_CL_LADDER = actions.parse_ladder(
-    os.getenv("ACTION_CL_LADDER", "-8:50,-15:100"), kind="loss"
+    os.getenv("ACTION_CL_LADDER") or "-8:50,-15:100", kind="loss"
 )
+# Red-risk escalation caps past the top ladder tier (tunable beside the ladders)
+ACTION_RED_TP_CAP = float(os.getenv("ACTION_RED_TP_CAP") or "75")
+ACTION_RED_CL_CAP = float(os.getenv("ACTION_RED_CL_CAP") or "100")
 
 # Schedule Configuration
 SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "08:00")  # Time to run daily analysis (24h format)
 
 # Risk Analysis Prompt
 RISK_PROMPT = """
-You are a financial analyst writing a daily briefing for a growth-oriented portfolio. You are given pre-calculated quantitative risk scores, raw market data with entry prices and unrealized P&L, deterministic take-profit/cut-loss suggestions, and news sentiment.
+You are a financial analyst writing a scheduled briefing for a growth-oriented portfolio (runs may be days apart, so frame changes since the previous run, not since yesterday). You are given pre-calculated quantitative risk scores, raw market data with entry prices and unrealized P&L, deterministic take-profit/cut-loss suggestions, and news sentiment.
 
 QUANTITATIVE RISK SCORES:
 {scores}
