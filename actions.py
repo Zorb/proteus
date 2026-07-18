@@ -148,11 +148,20 @@ def evaluate_position_action(
     return {"action": action, "trim_pct": trim, "reason": reason}
 
 
-def action_label(action, trim_pct):
+def action_label(action, trim_pct, position_size=None):
     """Human-readable label for an action — the single rendering source shared
-    by every surface (email table, and any future console/Telegram view)."""
+    by every surface (email table, and any future console/Telegram view).
+
+    With position_size, sell suggestions carry the share count in parentheses,
+    e.g. "Trim 25% (30)" for a 120-share position.
+    """
     if action == "take_profit_candidate":
-        return f"Trim {trim_pct:g}%"
-    if action == "cut_loss_candidate":
-        return "Exit" if trim_pct >= 100 else f"Cut {trim_pct:g}%"
-    return "–"
+        label = f"Trim {trim_pct:g}%"
+    elif action == "cut_loss_candidate":
+        label = "Exit" if trim_pct >= 100 else f"Cut {trim_pct:g}%"
+    else:
+        return "–"
+    if not _is_missing(position_size) and position_size > 0:
+        shares = round(position_size * trim_pct / 100, 1)
+        label += f" ({shares:g})"
+    return label

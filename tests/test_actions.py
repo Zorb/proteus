@@ -183,6 +183,19 @@ def test_action_label():
     assert actions.action_label("no_data", 0) == "–"
 
 
+def test_action_label_with_share_count():
+    assert actions.action_label("take_profit_candidate", 25.0, 120) == "Trim 25% (30)"
+    assert actions.action_label("cut_loss_candidate", 50.0, 630) == "Cut 50% (315)"
+    assert actions.action_label("cut_loss_candidate", 100.0, 630) == "Exit (630)"
+    # fractional positions keep one decimal
+    assert actions.action_label("take_profit_candidate", 25.0, 30) == "Trim 25% (7.5)"
+    # missing/invalid sizes omit the parenthetical; hold never gets one
+    assert actions.action_label("take_profit_candidate", 25.0, None) == "Trim 25%"
+    assert actions.action_label("take_profit_candidate", 25.0, float("nan")) == "Trim 25%"
+    assert actions.action_label("take_profit_candidate", 25.0, 0) == "Trim 25%"
+    assert actions.action_label("hold", 0, 100) == "–"
+
+
 # ---------------------------------------------------------------------------
 # reason strings
 # ---------------------------------------------------------------------------

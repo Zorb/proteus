@@ -409,6 +409,7 @@ class StockRiskAgent:
             stock_scores = {
                 "ticker": ticker,
                 "position_pct": round(d["position_pct"], 1),
+                "position_size": d["position_size"],
                 "current_price": d["current_price"],
                 "avg_price": d["avg_price"],
                 "unrealized_pnl_pct": round(pnl_pct, 1) if pnl_pct is not None else None,
@@ -425,7 +426,6 @@ class StockRiskAgent:
                 {
                     "ticker": ticker,
                     "current_price": d["current_price"],
-                    "position_size": d["position_size"],
                     "position_pct": round(d["position_pct"], 1),
                     "news": d["news"],
                     "pe_ratio": d["pe_ratio"],
@@ -646,7 +646,7 @@ class StockRiskAgent:
                     pnl_cell = f'<span style="color: {pnl_color}; font-weight: bold;">{pnl:+.1f}%</span>'
                 act = stock.get("action")
                 trim = stock.get("trim_pct", 0)
-                act_label = actions.action_label(act, trim)
+                act_label = actions.action_label(act, trim, stock.get("position_size"))
                 if act == "take_profit_candidate":
                     act_cell = f'<span style="color: {RATING_COLORS["green"]}; font-weight: bold;">{act_label}</span>'
                 elif act == "cut_loss_candidate":
