@@ -74,7 +74,7 @@ python stock_risk_agent.py          # one-shot: run once and exit (systemd timer
 python stock_risk_agent.py --loop   # internal scheduler: run now, then daily at SCHEDULE_TIME
 ```
 
-The Docker image uses `--loop` (daily at `SCHEDULE_TIME`, default 08:00). The systemd deployment (`proteus.service` + `proteus.timer`) uses one-shot mode on the timer's schedule (Mon+Fri 08:00); a failed one-shot run exits nonzero so the unit shows as failed.
+The Docker image uses `--loop` (daily at `SCHEDULE_TIME`, default 08:00). The systemd deployment (`proteus.service` + `proteus.timer`) uses one-shot mode on the timer's schedule (Mon+Fri 10:00 UTC, chosen to avoid IBKR's early-morning-ET maintenance window); a failed one-shot run exits nonzero so the unit shows as failed. The IBKR fetch retries 3× before falling back to `portfolio.csv`, which is auto-refreshed after every successful sync; fallback reports are flagged in the subject line and report header.
 
 ### 4. Tests
 

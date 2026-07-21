@@ -77,6 +77,7 @@ SCORING REFERENCE:
 - Categories and weights: Drawdown (20%), Downside Volatility (20%), Correlation (15%), Balance Sheet (15%), Liquidity (10%), Concentration (10%), Regime Sensitivity (10%)
 - portfolio_level_metrics shows risk computed on the aggregated portfolio return stream (captures diversification the per-stock average cannot). sector_hhi measures sector concentration (near 1/number-of-sectors = diversified, 1.0 = single sector).
 - Each stock carries action / trim_pct / action_reason: a deterministic partial take-profit or cut-loss suggestion from fixed unrealized-P&L tiers, shifted one tier by the risk rating (red harder, green softer). trim_pct is a percentage of the current position; position_size gives the share count, so express suggestions as both (e.g. "trim 25%, about 30 shares"). These are candidates, not orders — your job is judgment on top: endorse the trim size or push back, always citing a number.
+- data_source "csv_fallback" means the live IBKR sync failed and positions come from the last saved snapshot — open the OVERVIEW by saying the position data may be stale.
 - Alpha Vantage sentiment ranges from -0.35 (bearish) to +0.35 (bullish).
 - If data is missing for a source, skip it. Do not fabricate.
 

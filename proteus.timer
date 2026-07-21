@@ -1,8 +1,8 @@
 [Unit]
-Description=Run Proteus on Monday and Friday mornings at 08:00 UTC
+Description=Run Proteus on Monday and Friday at 10:00 UTC (avoids IBKR maintenance window)
 
 [Timer]
-OnCalendar=Mon,Fri *-*-* 08:00:00
+OnCalendar=Mon,Fri *-*-* 10:00:00
 Persistent=true
 
 [Install]

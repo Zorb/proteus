@@ -12,7 +12,7 @@ screening, intraday data.
 reuses `risk_framework`, `portfolio_sync`, `sentiment`, `_retry`, and the same `.env`.
 
 **Deployment note (2026-07-07):** the repo's reference deployment is Docker Compose, but
-ubuntu-main runs via systemd instead (`proteus.service` + `proteus.timer`, Mon+Fri 08:00 UTC;
+ubuntu-main runs via systemd instead (`proteus.service` + `proteus.timer`, Mon+Fri 10:00 UTC;
 `stock_risk_agent.py` with no args is one-shot, `--loop` runs the internal scheduler). For
 Phase 3 on this host, add `proteus-scout.service` + `proteus-scout.timer`
 (`OnCalendar=Sun 17:00`) instead of a second compose service — `SCOUT_SCHEDULE` /

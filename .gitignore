@@ -3,3 +3,4 @@ portfolio.csv
 __pycache__/
 *.py[cod]
 .venv/
+portfolio.csv.bak*

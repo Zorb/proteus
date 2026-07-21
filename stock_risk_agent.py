@@ -215,20 +215,41 @@ class StockRiskAgent:
         """Main analysis logic with quantitative risk scoring."""
         cprint("\n📊 Starting Portfolio Analysis...", "cyan")
 
-        # Load portfolio (IBKR first, CSV fallback)
+        # Load portfolio (IBKR first with retries, CSV fallback)
         df = None
+        data_source = None
         if config.IBKR_FLEX_TOKEN and config.IBKR_FLEX_QUERY_ID:
             cprint("🏦 Fetching portfolio from Interactive Brokers...", "cyan")
-            df = portfolio_sync.fetch_ibkr_portfolio()
+            for attempt in range(3):
+                if attempt:
+                    cprint(
+                        f"  🔁 IBKR retry {attempt + 1}/3 in 90s (transient maintenance windows pass)...",
+                        "yellow",
+                    )
+                    time.sleep(90)
+                df = portfolio_sync.fetch_ibkr_portfolio()
+                if df is not None:
+                    break
             if df is not None:
+                data_source = "ibkr"
                 cprint(f"✅ Portfolio loaded from IBKR ({len(df)} positions)", "green")
+                # Mirror the live portfolio so the CSV fallback is never staler
+                # than the last successful sync
+                try:
+                    df.to_csv(self.portfolio_file, index=False)
+                except OSError as e:
+                    cprint(f"  ⚠️ Could not refresh {self.portfolio_file}: {e}", "yellow")
             else:
-                cprint("⚠️ IBKR fetch failed, falling back to CSV", "yellow")
+                cprint("⚠️ IBKR fetch failed after 3 attempts, falling back to CSV", "yellow")
 
         if df is None:
             try:
                 df = pd.read_csv(self.portfolio_file)
-                cprint(f"📄 Portfolio loaded from CSV ({len(df)} positions)", "cyan")
+                data_source = "csv_fallback"
+                cprint(
+                    f"📄 Portfolio loaded from CSV snapshot ({len(df)} positions) — may be stale",
+                    "yellow",
+                )
             except FileNotFoundError:
                 cprint("❌ portfolio.csv not found and IBKR not configured!", "red")
                 return
@@ -466,6 +487,7 @@ class StockRiskAgent:
         )
 
         portfolio_summary = {
+            "data_source": data_source,
             "total_value": round(total_value, 2),
             "portfolio_composite_score": portfolio_composite,
             "portfolio_rating": rf._rating(portfolio_composite),
@@ -614,6 +636,15 @@ class StockRiskAgent:
 
         body_content = "\n".join(html_lines)
 
+        fallback_banner = ""
+        if portfolio_summary and portfolio_summary.get("data_source") == "csv_fallback":
+            fallback_banner = (
+                '<div style="background: #fff3cd; color: #856404; border: 1px solid '
+                '#ffeeba; border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; '
+                'font-size: 13px;">Live IBKR sync failed — positions come from the '
+                "last saved snapshot and may be stale.</div>"
+            )
+
         # Build risk summary table if portfolio_summary is available
         risk_table = ""
         if portfolio_summary and "stocks" in portfolio_summary:
@@ -694,6 +725,7 @@ class StockRiskAgent:
         <p style="margin: 4px 0 0; color: #aaa; font-size: 13px;">{datetime.now().strftime("%Y-%m-%d %H:%M")}</p>
     </div>
     <div style="border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 8px 8px; padding: 20px;">
+        {fallback_banner}
         {risk_table}
         <hr style="border: 1px solid #eee; margin: 20px 0;">
         {body_content}
@@ -719,9 +751,10 @@ class StockRiskAgent:
             msg["From"] = config.EMAIL_FROM or smtp_user
             recipients = [addr.strip() for addr in email_to.split(",")]
             msg["To"] = ", ".join(recipients)
-            msg["Subject"] = (
-                f"Proteus Risk Report - {datetime.now().strftime('%Y-%m-%d')}"
-            )
+            subject = f"Proteus Risk Report - {datetime.now().strftime('%Y-%m-%d')}"
+            if portfolio_summary and portfolio_summary.get("data_source") == "csv_fallback":
+                subject = "[CSV FALLBACK] " + subject
+            msg["Subject"] = subject
 
             # Plain-text fallback
             msg.attach(MIMEText(message, "plain", "utf-8"))
