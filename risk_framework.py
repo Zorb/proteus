@@ -8,10 +8,11 @@ Composite: Green 0-35, Yellow 35-65, Red 65-100.
 
 import numpy as np
 import pandas as pd
-from collections import Counter
 
 
 def _clamp(value, lo=0, hi=100):
+    if not np.isfinite(value):
+        raise ValueError("Risk score must be finite")
     return max(lo, min(hi, value))
 
 
@@ -68,9 +69,17 @@ def score_drawdown_profile(hist_1y, hist_3y, hist_5y):
     """Score based on max drawdown 1yr/3yr, drawdown from 5y high, Ulcer Index."""
     details = {}
 
-    close_1y = hist_1y["Close"] if hist_1y is not None and len(hist_1y) > 0 else None
-    close_3y = hist_3y["Close"] if hist_3y is not None and len(hist_3y) > 0 else None
-    close_5y = hist_5y["Close"] if hist_5y is not None and len(hist_5y) > 0 else None
+    closes = []
+    for hist in (hist_1y, hist_3y, hist_5y):
+        close = hist["Close"] if hist is not None and "Close" in hist else None
+        valid = close is not None and len(close) >= 20 and np.isfinite(close).all() and (close > 0).all()
+        closes.append(close if valid else None)
+    close_1y, close_3y, close_5y = closes
+    missing = [name for name, close in zip(("1y", "3y", "5y"), closes) if close is None]
+    details["data_available"] = len(missing) < 3
+    details["data_complete"] = not missing
+    details["missing_windows"] = missing
+    details["observations"] = {name: len(close) if close is not None else 0 for name, close in zip(("1y", "3y", "5y"), closes)}
 
     dd_1y = _max_drawdown(close_1y) if close_1y is not None else 0
     dd_3y = _max_drawdown(close_3y) if close_3y is not None else 0
@@ -88,19 +97,24 @@ def score_drawdown_profile(hist_1y, hist_3y, hist_5y):
     # Ulcer Index on 1yr data
     ulcer = _ulcer_index(close_1y) if close_1y is not None else 0
 
-    details["max_dd_1y"] = round(dd_1y * 100, 2)
-    details["max_dd_3y"] = round(dd_3y * 100, 2)
-    details["dd_from_5y_high"] = round(dd_from_high * 100, 2)
-    details["ulcer_index"] = round(ulcer, 2)
+    details["max_dd_1y"] = round(dd_1y * 100, 2) if close_1y is not None else None
+    details["max_dd_3y"] = round(dd_3y * 100, 2) if close_3y is not None else None
+    details["dd_from_5y_high"] = round(dd_from_high * 100, 2) if close_5y is not None else None
+    details["ulcer_index"] = round(ulcer, 2) if close_1y is not None else None
 
     # Drawdown blend (weights sum to 1.0), mapped so that
     # 10% DD → ~25 score, 30% DD → ~75, 50%+ DD → 100
-    dd_blend = dd_1y * 0.4 + dd_3y * 0.3 + dd_from_high * 0.3
+    available_weight = sum(weight for weight, close in zip((0.4, 0.3, 0.3), closes) if close is not None)
+    dd_blend = (dd_1y * 0.4 + dd_3y * 0.3 + dd_from_high * 0.3) / available_weight if available_weight else 0
     dd_score = _clamp(dd_blend * 100 * 2.5)
     # Ulcer: ~5 → mild, ~10 → elevated, 20+ → severe sustained drawdowns
-    ulcer_score = _clamp(ulcer * 5)
+    ulcer_score = _clamp(ulcer * 5) if close_1y is not None else 50
 
     raw_score = dd_score * 0.80 + ulcer_score * 0.20
+    if missing:
+        # Unknown is not zero risk. Preserve severe observed components when
+        # another window is absent, and never advertise partial data as safe.
+        raw_score = max(50, raw_score)
     score = _clamp(round(raw_score))
     return {"score": score, "rating": _rating(score), "details": details}
 
@@ -140,6 +154,10 @@ def score_downside_volatility(returns, spy_returns, risk_free_rate=0.04):
             down_beta = 1.0
     else:
         down_beta = 1.0
+    details["data_complete"] = bool(
+        spy_returns is not None and len(spy_returns) >= 20
+        and len(down_days) > 5 and spy_var > 0
+    )
     details["down_market_beta"] = round(down_beta, 2)
 
     # CVaR 5% (expected shortfall)
@@ -169,6 +187,17 @@ def score_downside_volatility(returns, spy_returns, risk_free_rate=0.04):
 def score_liquidity_risk(position_size, price, avg_volume, bid, ask, vol_30d, vol_90d):
     """Score based on days to liquidate, bid-ask spread, volume trend."""
     details = {}
+    # Optional Yahoo fields may be NaN, not just None. Do not turn them into
+    # extreme scores through truthiness or advertise default values as observed.
+    def finite(value):
+        return value is not None and np.isfinite(value)
+
+    details["data_complete"] = all(finite(value) for value in (avg_volume, bid, ask, vol_30d, vol_90d))
+    avg_volume = avg_volume if finite(avg_volume) else None
+    bid = bid if finite(bid) else None
+    ask = ask if finite(ask) else None
+    vol_30d = vol_30d if finite(vol_30d) else None
+    vol_90d = vol_90d if finite(vol_90d) else None
 
     # Days to liquidate (assume 10% of avg daily volume)
     if avg_volume and avg_volume > 0 and price and price > 0:
@@ -190,7 +219,7 @@ def score_liquidity_risk(position_size, price, avg_volume, bid, ask, vol_30d, vo
     details["bid_ask_spread_pct"] = round(spread_pct, 2)
 
     # Volume trend
-    if vol_30d and vol_90d and vol_90d > 0:
+    if vol_30d is not None and vol_90d is not None and vol_90d > 0:
         vol_trend = vol_30d / vol_90d
     else:
         vol_trend = 1.0
@@ -203,6 +232,8 @@ def score_liquidity_risk(position_size, price, avg_volume, bid, ask, vol_30d, vo
     vol_score = _clamp((1.0 - vol_trend) * 100) if vol_trend < 1.0 else 0
 
     raw = liq_score * 0.45 + spread_score * 0.35 + vol_score * 0.20
+    if not details["data_complete"]:
+        raw = max(raw, 50)
     score = _clamp(round(raw))
     return {"score": score, "rating": _rating(score), "details": details}
 
@@ -271,6 +302,11 @@ def score_balance_sheet(balance_sheet_df, income_stmt_df):
         score = _clamp(round(sum(scores) / len(scores)))
     else:
         score = 50
+    # Known zero interest expense makes coverage inapplicable, not missing.
+    # Keep averaging the applicable ratios without inventing an infinite ratio.
+    interest_not_applicable = ebitda is not None and interest == 0
+    details["interest_coverage_not_applicable"] = interest_not_applicable
+    details["data_complete"] = len(scores) == (2 if interest_not_applicable else 3)
     return {"score": score, "rating": _rating(score), "details": details}
 
 
@@ -296,10 +332,16 @@ def score_correlation_risk(
         if len(aligned) >= 60:
             rolling_corr = aligned["stock"].rolling(60).corr(aligned["spy"])
             avg_corr = rolling_corr.dropna().mean()
-        else:
+        elif len(aligned) >= 30:
             avg_corr = aligned["stock"].corr(aligned["spy"])
+        else:
+            avg_corr = float("nan")
     else:
+        avg_corr = float("nan")
+    if not np.isfinite(avg_corr):
         avg_corr = 0.5
+        details["data_complete"] = False
+        details["spy_correlation_available"] = False
     details["avg_spy_correlation"] = (
         round(avg_corr, 2) if not np.isnan(avg_corr) else 0.5
     )
@@ -432,6 +474,7 @@ def score_regime_sensitivity(returns, tnx_changes, vix_series):
         details["insufficient_stress_history"] = True
         return {"score": 50, "rating": "yellow", "details": details}
 
+    details["data_complete"] = len(component_scores) == 2
     score = _clamp(round(sum(component_scores) / len(component_scores)))
     return {"score": score, "rating": _rating(score), "details": details}
 
@@ -439,6 +482,49 @@ def score_regime_sensitivity(returns, tnx_changes, vix_series):
 # ---------------------------------------------------------------------------
 # Portfolio-level metrics
 # ---------------------------------------------------------------------------
+def build_portfolio_returns(histories, weights, benchmark_returns=None):
+    """Require a complete common price calendar for this USD stock portfolio.
+
+    A missing observation could be a data outage or a halt. Do not assume a
+    zero return, renormalize away a holding, or discard that day's other moves.
+    Returns (individual returns frame, portfolio returns, coverage metadata).
+    """
+    series = {}
+    unavailable = []
+    for ticker in weights:
+        hist = histories.get(ticker)
+        if hist is None or "Close" not in hist or len(hist) < 21:
+            unavailable.append(ticker)
+            continue
+        close = normalize_daily_index(hist["Close"]).sort_index()
+        if close.index.has_duplicates or not np.isfinite(close).all() or not (close > 0).all():
+            unavailable.append(ticker)
+            continue
+        series[ticker] = close
+    coverage = {"data_available": False, "missing_history_tickers": unavailable}
+    if unavailable or not series:
+        return None, None, coverage
+    prices = pd.DataFrame(series).sort_index()
+    if benchmark_returns is not None and not benchmark_returns.empty:
+        calendar = normalize_daily_index(benchmark_returns).index
+        calendar = calendar[calendar >= prices.index.min()]
+        prices = prices.reindex(prices.index.union(calendar)).sort_index()
+    gaps = prices.isna().sum()
+    coverage.update({
+        "start_date": prices.index.min().strftime("%Y-%m-%d"),
+        "end_date": prices.index.max().strftime("%Y-%m-%d"),
+        "missing_observations": {ticker: int(count) for ticker, count in gaps.items() if count},
+    })
+    if prices.isna().any().any():
+        return None, None, coverage
+    w = pd.Series(weights).reindex(prices.columns)
+    if not np.isfinite(w).all() or (w <= 0).any() or not np.isclose(w.sum(), 1.0):
+        raise ValueError("Portfolio return weights must be positive and sum to one")
+    returns = prices.pct_change(fill_method=None).iloc[1:]
+    coverage.update({"data_available": True, "observations": len(returns), "method": "current_weights_daily_rebalanced_proxy"})
+    return returns, returns.mul(w).sum(axis=1), coverage
+
+
 def score_portfolio_level(portfolio_returns, spy_returns, risk_free_rate=0.04):
     """Risk metrics computed on the aggregated portfolio return stream.
 
@@ -450,11 +536,14 @@ def score_portfolio_level(portfolio_returns, spy_returns, risk_free_rate=0.04):
     if portfolio_returns is None or len(portfolio_returns) < 20:
         return None
 
-    prices = (1 + portfolio_returns).cumprod()
+    if not np.isfinite(portfolio_returns).all():
+        return None
+    prices = pd.concat([pd.Series([1.0]), (1 + portfolio_returns).cumprod()], ignore_index=True)
     downside = score_downside_volatility(portfolio_returns, spy_returns, risk_free_rate)
 
     return {
         "max_drawdown_1y_pct": round(_max_drawdown(prices) * 100, 2),
+        "observations": len(portfolio_returns),
         "downside_volatility_score": downside["score"],
         "downside_details": downside["details"],
     }
@@ -486,7 +575,7 @@ def portfolio_red_alert(all_scores, portfolio_composite, min_position_pct=5.0):
         s["composite"]["red_alert"] and s["position_pct"] >= min_position_pct
         for s in all_scores
     )
-    return significant_stock_alert or portfolio_composite > 65
+    return significant_stock_alert or portfolio_composite >= 65
 
 
 def calculate_composite(scores_dict):
@@ -499,10 +588,14 @@ def calculate_composite(scores_dict):
     weighted_sum = 0
     category_summary = {}
     any_critical = False
+    incomplete_categories = []
 
     for category, weight in WEIGHTS.items():
         cat_data = scores_dict.get(category, {"score": 50})
         cat_score = cat_data.get("score", 50)
+        details = cat_data.get("details", {})
+        if category not in scores_dict or details.get("data_available") is False or details.get("data_complete") is False or details.get("insufficient_stress_history"):
+            incomplete_categories.append(category)
         weighted_sum += cat_score * weight
         category_summary[category] = {
             "score": cat_score,
@@ -513,11 +606,14 @@ def calculate_composite(scores_dict):
             any_critical = True
 
     composite = _clamp(round(weighted_sum))
-    red_alert = any_critical or composite > 65
+    red_alert = any_critical or composite >= 65
 
     return {
         "composite_score": composite,
         "rating": _rating(composite),
         "red_alert": red_alert,
+        "critical_alert": any_critical,
+        "data_complete": not incomplete_categories,
+        "incomplete_categories": incomplete_categories,
         "category_scores": category_summary,
     }

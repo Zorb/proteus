@@ -56,7 +56,7 @@ SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "08:00")  # Time to run daily analysi
 
 # Risk Analysis Prompt
 RISK_PROMPT = """
-You are a financial analyst writing a scheduled briefing for a growth-oriented portfolio (runs may be days apart, so frame changes since the previous run, not since yesterday). You are given pre-calculated quantitative risk scores, raw market data with entry prices and unrealized P&L, deterministic take-profit/cut-loss suggestions, and news sentiment.
+You are a financial analyst helping decide which stocks to keep and which to trim in a long-only UK ISA holding USD-denominated stocks. This is a snapshot of the stock holdings, excluding cash; all valuations are USD. You are given pre-calculated historical risk scores, market data with entry prices and unrealized P&L, deterministic take-profit/cut-loss candidates, and news sentiment. No previous-run comparison or investment-thesis history is supplied: do not claim changes since a prior report or invent evidence about a growth thesis.
 
 QUANTITATIVE RISK SCORES:
 {scores}
@@ -73,10 +73,12 @@ NEWS SENTIMENT DATA (Alpha Vantage):
 SCORING REFERENCE:
 - Each category is scored 0-100 (0 = safe, 100 = maximum risk)
 - Green (0-35), Yellow (35-65), Red (65-100)
-- Red Alert triggers when a position of meaningful size (at least 5% of the portfolio by default) goes red, or the portfolio composite exceeds 65. Smaller positions can be individually red without triggering a portfolio alert — still mention them, but don't lead with them.
+- Use the supplied portfolio_red_alert boolean for the portfolio alert. It incorporates configured position thresholds, critical category scores above 80, and composite scores at or above 65. Do not recalculate or override it. Smaller positions can have their own critical alerts without triggering a portfolio alert.
 - Categories and weights: Drawdown (20%), Downside Volatility (20%), Correlation (15%), Balance Sheet (15%), Liquidity (10%), Concentration (10%), Regime Sensitivity (10%)
 - portfolio_level_metrics shows risk computed on the aggregated portfolio return stream (captures diversification the per-stock average cannot). sector_hhi measures sector concentration (near 1/number-of-sectors = diversified, 1.0 = single sector).
 - Each stock carries action / trim_pct / action_reason: a deterministic partial take-profit or cut-loss suggestion from fixed unrealized-P&L tiers, shifted one tier by the risk rating (red harder, green softer). trim_pct is a percentage of the current position; position_size gives the share count, so express suggestions as both (e.g. "trim 25%, about 30 shares"). These are candidates, not orders — your job is judgment on top: endorse the trim size or push back, always citing a number.
+- A critical_alert takes precedence over a green composite; do not call such a position safe. Incomplete data disables green softening. An action of review means the evidence needs attention; hold means no P&L ladder was triggered, not an endorsement of the investment thesis. Make uncertainty explicit, and distinguish any proposed amendment from the deterministic candidate in the table.
+- data_complete false and data_quality_issues identify provisional evidence. Missing history is unknown risk, not zero risk. If portfolio_return_coverage.data_available is false, aggregated portfolio metrics are unavailable; do not infer diversification or a zero drawdown. Use actual observation counts and dates, not an assumed full-year history.
 - data_source "csv_fallback" means the live IBKR sync failed and positions come from the last saved snapshot — open the OVERVIEW by saying the position data may be stale.
 - Alpha Vantage sentiment ranges from -0.35 (bearish) to +0.35 (bullish).
 - If data is missing for a source, skip it. Do not fabricate.
@@ -95,7 +97,7 @@ WRITING RULES:
 FORMAT:
 
 ALERT
-(Only include this section if red_alert is true. One sentence: what triggered it and the number.)
+(Only include this section if portfolio_red_alert is true. One sentence: what triggered it and the number. Deterministic warnings are also added by the reporting system.)
 
 OVERVIEW
 Portfolio risk score: [X]/100 ([rating]). Total value: $[X]. VIX is at [X] and the 10Y yield is [X]%. Biggest concern across the portfolio: [category] averaging [X]/100.

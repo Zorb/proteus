@@ -4,7 +4,7 @@ actions.py — Entry-aware action layer: partial take-profit / cut-loss suggesti
 Deterministic and stateless. Fixed P&L ladders (configurable via .env) pick a
 base tier, then the position's risk rating shifts the suggestion one tier:
 red acts harder, green softer, yellow keeps the base. The risk score itself
-stays forward-looking — this module is the only place entry price matters.
+stays independent of entry price — this module supplies the P&L context.
 
 Suggestions are recomputed each run against the current holding; after a real
 trim the position shrinks but avg price doesn't, so a standing suggestion
@@ -20,7 +20,7 @@ RED_TOP_CL_TRIM = 100.0
 
 
 def _is_missing(value):
-    return value is None or (isinstance(value, float) and math.isnan(value))
+    return value is None or not math.isfinite(value)
 
 
 def unrealized_pnl_pct(current_price, avg_price):
@@ -63,6 +63,8 @@ def parse_ladder(spec, kind):
             raise ValueError(
                 f"Non-numeric ladder tier {part!r} in {spec!r} (want 'threshold:trim_pct')"
             )
+        if not math.isfinite(threshold) or not math.isfinite(trim):
+            raise ValueError("Ladder thresholds and trims must be finite")
         if kind == "gain" and threshold <= 0:
             raise ValueError(f"Gain ladder thresholds must be > 0, got {threshold}")
         if kind == "loss" and threshold >= 0:
@@ -73,6 +75,10 @@ def parse_ladder(spec, kind):
     if not tiers:
         raise ValueError(f"Empty ladder spec {spec!r}")
     tiers.sort(key=lambda t: abs(t[0]))
+    if len({threshold for threshold, _ in tiers}) != len(tiers):
+        raise ValueError("Ladder thresholds must be unique")
+    if any(later[1] < earlier[1] for earlier, later in zip(tiers, tiers[1:])):
+        raise ValueError("Trim sizes must not decrease at higher tiers")
     return tiers
 
 
@@ -93,28 +99,45 @@ def evaluate_position_action(
     cl_ladder,
     red_tp_cap=RED_TOP_TP_TRIM,
     red_cl_cap=RED_TOP_CL_TRIM,
+    critical_alert=False,
+    data_complete=True,
 ):
     """Suggest a partial exit for one position.
 
     Returns {"action", "trim_pct", "reason"}. Actions: take_profit_candidate /
-    cut_loss_candidate (with trim_pct of the current position), hold, no_data.
+    cut_loss_candidate (with trim_pct of the current position), hold, review, no_data.
     red_tp_cap / red_cl_cap bound the red-risk escalation past the top tier.
+    Critical categories override the composite colour. Incomplete evidence
+    prevents green softening and requires review when no P&L tier is crossed.
     """
-    if pnl_pct is None:
+    if any(not math.isfinite(cap) or not 0 < cap <= 100 for cap in (red_tp_cap, red_cl_cap)):
+        raise ValueError("Red escalation limits must be finite percentages in (0, 100]")
+    if _is_missing(pnl_pct):
         return {
             "action": "no_data",
             "trim_pct": 0,
             "reason": "entry price or current price unavailable",
         }
 
+    if critical_alert:
+        rating = "red"
+    elif not data_complete and rating == "green":
+        rating = "yellow"
+
+    context = ""
+    if critical_alert:
+        context += "; critical category alert takes precedence over composite colour"
+    if not data_complete:
+        context += "; incomplete risk data: verify before acting; green softening disabled"
+
     tp_idx = _crossed_index(pnl_pct, tp_ladder, "gain")
     cl_idx = _crossed_index(pnl_pct, cl_ladder, "loss")
 
     if tp_idx is None and cl_idx is None:
         return {
-            "action": "hold",
+            "action": "review" if critical_alert or not data_complete else "hold",
             "trim_pct": 0,
-            "reason": f"{pnl_pct:+.1f}% from entry, inside ladder thresholds",
+            "reason": f"{pnl_pct:+.1f}% from entry, inside ladder thresholds{context}",
         }
 
     if tp_idx is not None:
@@ -145,7 +168,7 @@ def evaluate_position_action(
         trim = base_trim
         reason = f"{base}; {rating} risk keeps base tier"
 
-    return {"action": action, "trim_pct": trim, "reason": reason}
+    return {"action": action, "trim_pct": trim, "reason": reason + context}
 
 
 def action_label(action, trim_pct, position_size=None):
@@ -159,6 +182,8 @@ def action_label(action, trim_pct, position_size=None):
         label = f"Trim {trim_pct:g}%"
     elif action == "cut_loss_candidate":
         label = "Exit" if trim_pct >= 100 else f"Cut {trim_pct:g}%"
+    elif action == "review":
+        return "Review"
     else:
         return "–"
     if not _is_missing(position_size) and position_size > 0:

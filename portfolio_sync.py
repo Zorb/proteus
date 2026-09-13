@@ -5,12 +5,13 @@ Two-step API flow:
 1. SendRequest — submit the query, get a ReferenceCode
 2. GetStatement — retrieve the results as XML (after a short delay)
 
-Returns a DataFrame with columns: Ticker, Position_Size, Avg_Price
-matching the portfolio.csv schema. Returns None on any failure.
+Returns a DataFrame with Ticker, Position_Size, Avg_Price and Currency (USD).
+An empty DataFrame is a valid empty stock portfolio. None indicates an unavailable
+response; invalid or unsupported holdings raise PortfolioValidationError.
 """
 
 import time
-import json
+import math
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -20,6 +21,60 @@ import config
 
 
 FLEX_BASE_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
+
+
+class PortfolioValidationError(ValueError):
+    """Holdings cannot safely be interpreted as a long-only USD portfolio."""
+
+
+def normalize_positions(df):
+    """Validate CSV/broker holdings and combine lots using quantity-weighted cost.
+
+    Legacy CSVs without Currency use the account's explicit USD convention.
+    Missing entry prices remain unknown; they are never used as market prices.
+    """
+    required = {"Ticker", "Position_Size", "Avg_Price"}
+    if not required.issubset(df.columns):
+        raise PortfolioValidationError("Portfolio requires Ticker, Position_Size and Avg_Price")
+    groups = {}
+    for _, row in df.iterrows():
+        ticker = row["Ticker"]
+        if not isinstance(ticker, str) or not ticker.strip():
+            raise PortfolioValidationError("Portfolio contains a missing ticker")
+        ticker = ticker.strip().upper()
+        try:
+            quantity = float(row["Position_Size"])
+        except (TypeError, ValueError):
+            raise PortfolioValidationError(f"{ticker}: invalid position size")
+        if not math.isfinite(quantity) or quantity < 0:
+            raise PortfolioValidationError(f"{ticker}: position must be finite and long-only")
+        if quantity == 0:
+            continue
+        currency = row.get("Currency", "USD")
+        if currency != "USD":
+            raise PortfolioValidationError(f"{ticker}: expected USD, received {currency!r}")
+        try:
+            avg = float(row["Avg_Price"])
+        except (TypeError, ValueError):
+            avg = float("nan")
+        avg = avg if math.isfinite(avg) and avg > 0 else None
+        group = groups.setdefault(ticker, {"quantity": 0.0, "cost": 0.0, "entry_known": True})
+        group["quantity"] += quantity
+        if avg is None:
+            group["entry_known"] = False
+        else:
+            group["cost"] += quantity * avg
+    rows = []
+    for ticker, group in groups.items():
+        if not math.isfinite(group["quantity"]) or not math.isfinite(group["cost"]):
+            raise PortfolioValidationError(f"{ticker}: position totals overflowed")
+        rows.append({
+            "Ticker": ticker,
+            "Position_Size": group["quantity"],
+            "Avg_Price": group["cost"] / group["quantity"] if group["entry_known"] else None,
+            "Currency": "USD",
+        })
+    return pd.DataFrame(rows, columns=["Ticker", "Position_Size", "Avg_Price", "Currency"])
 
 # Map IBKR listing exchanges to Yahoo Finance ticker suffixes.
 # US exchanges (NYSE, NASDAQ, ARCA, AMEX, BATS, etc.) get no suffix.
@@ -62,7 +117,8 @@ def fetch_ibkr_portfolio():
     Requires config.IBKR_FLEX_TOKEN and config.IBKR_FLEX_QUERY_ID to be set.
 
     Returns:
-        pd.DataFrame with columns [Ticker, Position_Size, Avg_Price] or None on failure.
+        Validated USD holdings, including an empty DataFrame for zero positions.
+        None on transport/response failure; invalid holdings raise explicitly.
     """
     token = config.IBKR_FLEX_TOKEN
     query_id = config.IBKR_FLEX_QUERY_ID
@@ -87,12 +143,12 @@ def fetch_ibkr_portfolio():
 
     # Step 4: Parse positions from XML
     positions = _parse_positions(xml_data)
-    if not positions:
-        cprint("⚠️ No stock positions found in IBKR response", "yellow")
+    if positions is None:
         return None
 
-    df = pd.DataFrame(positions, columns=["Ticker", "Position_Size", "Avg_Price"])
-    return df
+    # [] is a valid empty portfolio, not an unavailable broker response.
+    df = pd.DataFrame(positions, columns=["Ticker", "Position_Size", "Avg_Price", "Currency"])
+    return normalize_positions(df)
 
 
 def _send_request(token, query_id):
@@ -177,17 +233,58 @@ def _get_statement(token, reference_code, max_attempts=5, delay=5):
 
 
 def _parse_positions(xml_data):
-    """Parse OpenPosition elements from the Flex statement XML."""
+    """Return positions, [] for a verified empty statement, or None for bad XML.
+
+    Summary rows take precedence over lots for the same account/instrument.
+    Ambiguous holdings fail explicitly instead of silently reusing old holdings.
+    """
     positions = []
 
     try:
         root = ET.fromstring(xml_data)
     except ET.ParseError as e:
         cprint(f"  ❌ Failed to parse IBKR XML: {e}", "red")
-        return positions
+        return None
+
+    statements = root.findall("./FlexStatements/FlexStatement")
+    if root.tag != "FlexQueryResponse" or not statements or any(
+        statement.find("OpenPositions") is None for statement in statements
+    ):
+        cprint("  ❌ IBKR response is missing its OpenPositions section", "red")
+        return None
+
+    grouped = {}
+    report_dates = set()
+    for statement in statements:
+        for position in statement.findall("./OpenPositions/OpenPosition"):
+            if not position.get("assetCategory"):
+                raise PortfolioValidationError("IBKR position is missing AssetCategory")
+            if position.get("assetCategory") != "STK":
+                continue
+            report_date = position.get("reportDate") or statement.get("toDate")
+            if report_date:
+                report_dates.add(report_date)
+            key = (
+                position.get("accountId", statement.get("accountId", "")),
+                position.get("conid") or position.get("symbol", ""),
+                position.get("listingExchange", ""),
+            )
+            grouped.setdefault(key, []).append(position)
+
+    if len(report_dates) > 1:
+        raise PortfolioValidationError("IBKR positions span multiple report dates")
+
+    selected = []
+    for rows in grouped.values():
+        if any(row.get("levelOfDetail", "SUMMARY").upper() not in ("SUMMARY", "LOT") for row in rows):
+            raise PortfolioValidationError("IBKR returned an unsupported position detail level")
+        summaries = [row for row in rows if row.get("levelOfDetail", "SUMMARY").upper() == "SUMMARY"]
+        if len(summaries) > 1:
+            raise PortfolioValidationError("IBKR returned duplicate summaries for an instrument/account")
+        selected.extend(summaries or rows)
 
     # Flex Query XML structure: FlexQueryResponse > FlexStatements > FlexStatement > OpenPositions > OpenPosition
-    for position in root.iter("OpenPosition"):
+    for position in selected:
         asset_class = position.get("assetCategory", "")
 
         # Only include stocks (skip options, futures, forex, bonds, warrants, etc.)
@@ -196,13 +293,13 @@ def _parse_positions(xml_data):
 
         symbol = position.get("symbol", "").strip()
         if not symbol:
-            continue
+            raise PortfolioValidationError("IBKR stock position has no symbol")
 
-        # Get quantity (absolute value — Flex reports short positions as negative)
+        # Preserve direction so unsupported shorts fail validation.
         try:
-            quantity = abs(float(position.get("position", "0")))
+            quantity = float(position.get("position", "nan"))
         except ValueError:
-            continue
+            raise PortfolioValidationError(f"{symbol}: invalid broker quantity")
 
         if quantity == 0:
             continue
@@ -223,6 +320,7 @@ def _parse_positions(xml_data):
                 "Ticker": ticker,
                 "Position_Size": quantity,
                 "Avg_Price": round(cost_basis, 4),
+                "Currency": position.get("currency", ""),
             }
         )
 

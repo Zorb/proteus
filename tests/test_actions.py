@@ -210,3 +210,35 @@ def test_reason_cites_pnl_tier_and_rating():
     result = evaluate(-9.2, "yellow")
     assert "-9.2%" in result["reason"]
     assert "-8%" in result["reason"]
+
+
+def test_critical_alert_overrides_green_composite():
+    result = actions.evaluate_position_action(-10, "green", TP, CL, critical_alert=True)
+    assert result["action"] == "cut_loss_candidate"
+    assert result["trim_pct"] == 100
+    assert "critical category" in result["reason"]
+
+
+def test_incomplete_data_disables_green_softening():
+    result = actions.evaluate_position_action(-10, "green", TP, CL, data_complete=False)
+    assert result["trim_pct"] == 50
+    assert "incomplete risk data" in result["reason"]
+
+
+@pytest.mark.parametrize("kwargs", [{"critical_alert": True}, {"data_complete": False}])
+def test_review_instead_of_hold_when_evidence_needs_attention(kwargs):
+    result = actions.evaluate_position_action(0, "green", TP, CL, **kwargs)
+    assert result["action"] == "review"
+    assert actions.action_label(result["action"], 0) == "Review"
+
+
+@pytest.mark.parametrize("spec", ["nan:25", "inf:25", "25:25,25:50", "25:50,50:25"])
+def test_invalid_ladder_cannot_generate_candidates(spec):
+    with pytest.raises(ValueError):
+        actions.parse_ladder(spec, "gain")
+
+
+@pytest.mark.parametrize("cap", [0, -1, 200, float("nan"), float("inf")])
+def test_invalid_escalation_percentage_is_rejected(cap):
+    with pytest.raises(ValueError):
+        actions.evaluate_position_action(60, "red", TP, CL, red_tp_cap=cap)

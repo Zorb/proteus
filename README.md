@@ -2,6 +2,8 @@
 
 AI-powered stock portfolio risk monitor. Runs on a schedule, scores your holdings across 7 risk categories, suggests partial take-profit/cut-loss actions from your entry prices, enriches with news sentiment, and delivers a plain-language briefing via email or Telegram.
 
+Configured for a **long-only UK ISA holding USD-denominated stocks**. Values and weights cover the stock holdings, excluding cash. Unexpected currencies and short positions are rejected; legacy CSVs without a `Currency` column are interpreted as USD. This is a decision aid for which holdings to keep, review, or trim; the risk score is a historical heuristic, not a forecast of returns.
+
 ## How it works
 
 1. Loads your portfolio from Interactive Brokers (or a CSV fallback)
@@ -74,7 +76,9 @@ python stock_risk_agent.py          # one-shot: run once and exit (systemd timer
 python stock_risk_agent.py --loop   # internal scheduler: run now, then daily at SCHEDULE_TIME
 ```
 
-The Docker image uses `--loop` (daily at `SCHEDULE_TIME`, default 08:00). The systemd deployment (`proteus.service` + `proteus.timer`) uses one-shot mode on the timer's schedule (Mon+Fri 10:00 UTC, chosen to avoid IBKR's early-morning-ET maintenance window); a failed one-shot run exits nonzero so the unit shows as failed. The IBKR fetch retries 3× before falling back to `portfolio.csv`, which is auto-refreshed after every successful sync; fallback reports are flagged in the subject line and report header.
+The Docker image uses `--loop` (daily at `SCHEDULE_TIME`, default 08:00). The systemd deployment (`proteus.service` + `proteus.timer`) uses one-shot mode on the timer's schedule (Mon+Fri 10:00 UTC, chosen to avoid IBKR's early-morning-ET maintenance window); a failed one-shot run exits nonzero so the unit shows as failed. The IBKR fetch retries 3× before falling back to `portfolio.csv`, which is refreshed after a validated sync, including a valid empty portfolio. Invalid/unsupported holdings fail explicitly rather than reusing old positions. Fallback reports are flagged in the subject line and report header.
+
+An AI outage sends a deterministic quantitative briefing, then marks the one-shot run failed. A missing valuation or entirely unavailable holding withholds portfolio scores and candidates and attempts a failure notice. Notification errors propagate; with `both`, both channels are attempted and either failure marks the run failed. No live orders are placed.
 
 ### 4. Tests
 
@@ -95,11 +99,15 @@ python -m pytest tests/
 | Concentration | 10% | Position size risk |
 | Regime Sensitivity | 10% | Performance during rate spikes and VIX crises |
 
-Each scored 0-100. Green (0-35), Yellow (35-65), Red (65-100). A red alert triggers if a position of at least 5% of the portfolio (configurable via `ALERT_MIN_POSITION_PCT`) has a category above 80 or goes red overall, or if the portfolio composite exceeds 65. Smaller positions can be individually red without flagging the whole portfolio.
+Each scored 0-100. Green is below 35, yellow is 35 to below 65, and red is 65 or higher. A red alert triggers if a position of at least 5% of the portfolio (configurable via `ALERT_MIN_POSITION_PCT`) has a category above 80 or goes red overall, or if the portfolio composite is at least 65. Smaller positions can have critical alerts without flagging the whole portfolio. Weights retain full precision for calculations and alert thresholds.
+
+Missing drawdown history is unknown risk, with a neutral minimum score of 50 and explicit availability flags. Missing categories, short lookbacks, and incomplete portfolio history mark the report provisional. Empty/corrupt history is retried; history older than seven calendar days is rejected. Prices use a valid quote or the latest validated close, never entry cost. Portfolio return metrics require a complete common price calendar; gaps make those metrics unavailable rather than deleting market moves or renormalizing away a holding. These metrics are a current-weight, daily-rebalanced historical proxy, not the account's realized performance.
 
 ## Action suggestions
 
-Separately from the risk score (which stays forward-looking), each position gets a deterministic partial take-profit / cut-loss suggestion based on unrealized P&L from entry. Fixed ladders pick a base tier — `ACTION_TP_LADDER` (default `25:25,50:50`: at +25% gain trim 25% of the position, at +50% trim 50%) and `ACTION_CL_LADDER` (default `-8:50,-15:100`: at −8% cut half, at −15% exit) — then the risk rating shifts the suggestion one tier: red escalates, green softens (a tier-1 signal on a green stock downgrades to hold), yellow keeps the base. Suggestions are candidates, not orders; Claude addresses each one in the report. Stateless: a standing suggestion repeats each run until acted on.
+Separately from the historical risk score, each position gets a deterministic partial take-profit / cut-loss suggestion based on unrealized P&L from entry. Fixed ladders pick a base tier — `ACTION_TP_LADDER` (default `25:25,50:50`: at +25% gain trim 25% of the position, at +50% trim 50%) and `ACTION_CL_LADDER` (default `-8:50,-15:100`: at −8% cut half, at −15% exit) — then the risk rating shifts the suggestion one tier: red escalates, green softens, yellow keeps the base. A critical category alert takes precedence over a green composite; incomplete risk evidence disables green softening. Inside the P&L thresholds, a critical alert or incomplete evidence produces `Review` rather than `hold`. Missing entry data produces no sized candidate.
+
+Suggestions are candidates, not orders; Claude addresses each one in the report. `hold` means no ladder action, not a validated endorsement of the investment thesis. Suggestions remain stateless and can repeat even after a partial trim if the P&L tier still applies.
 
 ## Data sources
 

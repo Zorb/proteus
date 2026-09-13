@@ -4,3 +4,8 @@ __pycache__/
 *.py[cod]
 .venv/
 portfolio.csv.bak*
+
+# Local planning documents
+/plan/
+/plans/
+/PLAN.md

@@ -25,6 +25,40 @@ MUTED_COLOR = "#999"
 from datetime import datetime
 
 
+class AnalysisError(RuntimeError):
+    def __init__(self, message, report_sent=False):
+        super().__init__(message)
+        self.report_sent = report_sent
+
+
+class ReportDeliveryError(RuntimeError):
+    pass
+
+
+def _positive_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _validated_history(ticker, period):
+    """Validate inside retries: empty, corrupt and stale responses are failures."""
+    def fetch():
+        hist = ticker.history(period=period)
+        if hist is None or hist.empty or "Close" not in hist:
+            raise ValueError(f"{period} price history unavailable")
+        hist = rf.normalize_daily_index(hist).sort_index()
+        if hist.index.has_duplicates or not np.isfinite(hist["Close"]).all() or not (hist["Close"] > 0).all():
+            raise ValueError(f"{period} price history contains invalid observations")
+        age = (pd.Timestamp.now(tz="UTC").tz_localize(None).normalize() - hist.index[-1]).days
+        if age < 0 or age > 7:
+            raise ValueError(f"{period} price history is stale or future-dated")
+        return hist
+    return _retry(fetch, label=f"{getattr(ticker, 'ticker', 'benchmark')} {period}")
+
+
 def _retry(func, max_retries=3, base_delay=2, label=""):
     """Retry a function with exponential backoff. Returns result or raises last exception."""
     last_err = RuntimeError("No retries attempted")
@@ -59,7 +93,8 @@ def _json_default(obj):
 class StockRiskAgent:
     def __init__(self):
         """Initialize the Stock Risk Agent"""
-        self.setup_ai()
+        # Market analysis and deterministic warnings must work even without AI.
+        self.client = None
         self.portfolio_file = "portfolio.csv"
 
         cprint("🛡️ Stock Risk Agent Initialized", "white", "on_blue")
@@ -80,12 +115,10 @@ class StockRiskAgent:
         try:
             # 3y windows so regime analysis can see past stress events,
             # not just the (possibly calm) trailing year
-            spy_hist = _retry(
-                lambda: yf.Ticker("SPY").history(period="3y"), label="SPY"
-            )
+            spy_hist = _validated_history(yf.Ticker("SPY"), "3y")
             benchmarks["spy_hist"] = spy_hist
             benchmarks["spy_returns"] = rf.normalize_daily_index(
-                spy_hist["Close"].pct_change().dropna()
+                spy_hist["Close"].pct_change(fill_method=None).dropna()
             )
         except Exception as e:
             cprint(f"⚠️ SPY fetch error: {e}", "yellow")
@@ -93,9 +126,7 @@ class StockRiskAgent:
             benchmarks["spy_returns"] = pd.Series(dtype=float)
 
         try:
-            vix_hist = _retry(
-                lambda: yf.Ticker("^VIX").history(period="3y"), label="VIX"
-            )
+            vix_hist = _validated_history(yf.Ticker("^VIX"), "3y")
             benchmarks["vix_close"] = (
                 rf.normalize_daily_index(vix_hist["Close"])
                 if not vix_hist.empty
@@ -106,12 +137,10 @@ class StockRiskAgent:
             benchmarks["vix_close"] = pd.Series(dtype=float)
 
         try:
-            tnx_hist = _retry(
-                lambda: yf.Ticker("^TNX").history(period="3y"), label="TNX"
-            )
+            tnx_hist = _validated_history(yf.Ticker("^TNX"), "3y")
             if not tnx_hist.empty:
                 benchmarks["tnx_changes"] = rf.normalize_daily_index(
-                    tnx_hist["Close"].pct_change().dropna()
+                    tnx_hist["Close"].pct_change(fill_method=None).dropna()
                 )
                 benchmarks["risk_free_rate"] = (
                     tnx_hist["Close"].iloc[-1] / 100
@@ -136,9 +165,17 @@ class StockRiskAgent:
             stock = yf.Ticker(ticker)
 
             # Price history at multiple timeframes (with retry)
-            hist_1y = _retry(lambda: stock.history(period="1y"), label=f"{ticker} 1y")
-            hist_3y = _retry(lambda: stock.history(period="3y"), label=f"{ticker} 3y")
-            hist_5y = _retry(lambda: stock.history(period="5y"), label=f"{ticker} 5y")
+            histories = {}
+            quality_issues = []
+            for period, minimum in (("1y", 200), ("3y", 600), ("5y", 1000)):
+                try:
+                    histories[period] = _validated_history(stock, period)
+                    if len(histories[period]) < minimum:
+                        quality_issues.append(f"{period} history only has {len(histories[period])} observations")
+                except Exception as e:
+                    histories[period] = pd.DataFrame(columns=["Close", "Volume"])
+                    quality_issues.append(f"{period} history unavailable: {e}")
+            hist_1y, hist_3y, hist_5y = (histories[p] for p in ("1y", "3y", "5y"))
 
             # Recent closes for display (JSON-safe, no Timestamp keys)
             recent_closes = [
@@ -159,7 +196,7 @@ class StockRiskAgent:
 
             # Key info
             info = stock.info
-            currency = info.get("currency", "USD")
+            currency = info.get("currency")
 
             # Financials (may be empty for ETFs / some intl stocks)
             try:
@@ -173,17 +210,27 @@ class StockRiskAgent:
                 income_stmt = pd.DataFrame()
 
             # Volume averages for liquidity
-            vol_30d = hist_1y["Volume"].tail(30).mean() if len(hist_1y) >= 30 else None
-            vol_90d = hist_1y["Volume"].tail(90).mean() if len(hist_1y) >= 90 else None
+            volume = hist_1y.get("Volume", pd.Series(dtype=float))
+            vol_30d = volume.tail(30).mean() if len(volume) >= 30 else None
+            vol_90d = volume.tail(90).mean() if len(volume) >= 90 else None
 
-            current_price = info.get("currentPrice", info.get("regularMarketPrice"))
-            if currency == "GBp" and current_price:
-                current_price = current_price / 100  # pence → pounds
+            current_price = _positive_number(info.get("currentPrice")) or _positive_number(info.get("regularMarketPrice"))
+            price_source = "quote"
+            quote_time = _positive_number(info.get("regularMarketTime"))
+            if quote_time is not None and (time.time() - quote_time > 7 * 86400 or quote_time > time.time() + 86400):
+                current_price = None
+            if current_price is None and not hist_1y.empty:
+                current_price = _positive_number(hist_1y["Close"].iloc[-1])
+                price_source = "latest_validated_close"
+            if quote_time is None and price_source == "quote":
+                quality_issues.append("quote timestamp unavailable")
 
             return {
                 "ticker": ticker,
                 "currency": currency,
                 "current_price": current_price,
+                "price_source": price_source,
+                "data_quality_issues": quality_issues,
                 "recent_closes": recent_closes,
                 "hist_1y": hist_1y,
                 "hist_3y": hist_3y,
@@ -231,6 +278,7 @@ class StockRiskAgent:
                 if df is not None:
                     break
             if df is not None:
+                df = portfolio_sync.normalize_positions(df)
                 data_source = "ibkr"
                 cprint(f"✅ Portfolio loaded from IBKR ({len(df)} positions)", "green")
                 # Mirror the live portfolio so the CSV fallback is never staler
@@ -245,14 +293,21 @@ class StockRiskAgent:
         if df is None:
             try:
                 df = pd.read_csv(self.portfolio_file)
-                data_source = "csv_fallback"
+                data_source = "csv_fallback" if config.IBKR_FLEX_TOKEN and config.IBKR_FLEX_QUERY_ID else "csv"
                 cprint(
                     f"📄 Portfolio loaded from CSV snapshot ({len(df)} positions) — may be stale",
                     "yellow",
                 )
             except FileNotFoundError:
-                cprint("❌ portfolio.csv not found and IBKR not configured!", "red")
-                return
+                raise AnalysisError("No usable broker portfolio or portfolio.csv is available")
+
+        df = portfolio_sync.normalize_positions(df)
+        if df.empty:
+            summary = {"data_source": data_source, "currency": "USD", "total_value": 0,
+                       "portfolio_composite_score": None, "portfolio_rating": "unavailable",
+                       "portfolio_red_alert": False, "stocks": []}
+            self.send_report("OVERVIEW\nNo stock positions in the loaded portfolio. No keep or trim decisions are needed. Cash is outside this stock analysis.", summary)
+            return summary
 
         # Fetch benchmarks once
         benchmarks = self.fetch_benchmarks()
@@ -267,32 +322,31 @@ class StockRiskAgent:
             if data:
                 data["position_size"] = row["Position_Size"]
                 avg_price = row["Avg_Price"]
-                # LSE quotes are GBp (pence): fetch_data converts current_price
-                # to pounds, and IBKR/CSV entry prices arrive in pence too —
-                # convert so P&L compares like units
-                if data.get("currency") == "GBp" and avg_price:
-                    avg_price = avg_price / 100
-                data["avg_price"] = avg_price
+                data["avg_price"] = _positive_number(avg_price)
+                if data.get("currency") != "USD":
+                    raise AnalysisError(f"{ticker}: market data currency must be USD; received {data.get('currency')!r}")
+                data["current_price"] = _positive_number(data.get("current_price"))
+                if data["current_price"] is None:
+                    raise AnalysisError(f"{ticker}: current valuation unavailable; entry cost cannot substitute for market value")
                 portfolio_data.append(data)
             else:
                 skipped_tickers.append(ticker)
 
         if skipped_tickers:
-            cprint(
-                f"⚠️ Excluded from analysis (data fetch failed): {', '.join(skipped_tickers)}",
-                "yellow",
-            )
+            raise AnalysisError(f"Market data unavailable for {', '.join(skipped_tickers)}; portfolio weights and keep/trim suggestions withheld")
 
         if not portfolio_data:
-            cprint("❌ No data collected", "red")
-            return
+            raise AnalysisError("No market data collected")
 
         # Compute portfolio-level values
         total_value = 0
         for d in portfolio_data:
-            price = d["current_price"] or d["avg_price"]
+            price = d["current_price"]
             d["position_value"] = d["position_size"] * price
             total_value += d["position_value"]
+
+        if not math.isfinite(total_value) or total_value <= 0:
+            raise AnalysisError("Portfolio market value must be finite and positive")
 
         for d in portfolio_data:
             d["position_pct"] = (
@@ -313,32 +367,19 @@ class StockRiskAgent:
             else {}
         )
 
-        # Build portfolio returns (value-weighted, aligned all at once)
+        # Individual histories retain their own observations. Portfolio metrics
+        # require full coverage instead of deleting gaps or reweighting holdings.
         returns_dict = {}
-        weights_dict = {}
+        weights_dict = {d["ticker"]: d["position_pct"] / 100 for d in portfolio_data}
         for d in portfolio_data:
             if d["hist_1y"] is not None and len(d["hist_1y"]) > 0:
                 returns_dict[d["ticker"]] = rf.normalize_daily_index(
-                    d["hist_1y"]["Close"].pct_change().dropna()
+                    d["hist_1y"]["Close"].pct_change(fill_method=None).dropna()
                 )
-                weights_dict[d["ticker"]] = d["position_pct"] / 100
 
-        # Renormalize weights over tickers that actually have history, so a
-        # ticker without data doesn't silently shrink portfolio moves
-        if returns_dict:
-            all_returns_df = pd.DataFrame(returns_dict).dropna()
-            w_total = sum(weights_dict[t] for t in all_returns_df.columns)
-            portfolio_returns = (
-                sum(
-                    all_returns_df[t] * weights_dict[t] / w_total
-                    for t in all_returns_df.columns
-                )
-                if w_total > 0
-                else None
-            )
-        else:
-            all_returns_df = None
-            portfolio_returns = None
+        all_returns_df, portfolio_returns, return_coverage = rf.build_portfolio_returns(
+            {d["ticker"]: d["hist_1y"] for d in portfolio_data}, weights_dict, benchmarks["spy_returns"]
+        )
 
         # Score each stock
         cprint("🧮 Computing risk scores...", "magenta")
@@ -396,7 +437,7 @@ class StockRiskAgent:
             )
             # 3y returns so the regime window contains actual stress events
             returns_3y = (
-                rf.normalize_daily_index(d["hist_3y"]["Close"].pct_change().dropna())
+                rf.normalize_daily_index(d["hist_3y"]["Close"].pct_change(fill_method=None).dropna())
                 if d["hist_3y"] is not None and len(d["hist_3y"]) > 0
                 else returns_1y
             )
@@ -414,8 +455,17 @@ class StockRiskAgent:
                 "regime_sensitivity": regime,
             }
             composite = rf.calculate_composite(scores)
+            quality_issues = list(d.get("data_quality_issues", []))
+            quality_issues.extend(f"{category}: incomplete data" for category in composite["incomplete_categories"])
+            if not return_coverage["data_available"]:
+                quality_issues.append("portfolio history has gaps; portfolio correlation unavailable")
+            if not benchmarks["tnx_available"]:
+                quality_issues.append("Treasury yield unavailable; 4% risk-free assumption used")
+            if data_source == "csv_fallback":
+                quality_issues.append("broker sync unavailable; verify snapshot holdings before acting")
+            composite["data_complete"] = not quality_issues
 
-            # Entry-aware action layer — risk score stays forward-looking,
+            # Entry-aware action layer — risk score stays independent of entry,
             # this only suggests partial exits from unrealized P&L + rating
             pnl_pct = actions.unrealized_pnl_pct(d["current_price"], d["avg_price"])
             action = actions.evaluate_position_action(
@@ -425,11 +475,13 @@ class StockRiskAgent:
                 config.ACTION_CL_LADDER,
                 red_tp_cap=config.ACTION_RED_TP_CAP,
                 red_cl_cap=config.ACTION_RED_CL_CAP,
+                critical_alert=composite["critical_alert"],
+                data_complete=composite["data_complete"],
             )
 
             stock_scores = {
                 "ticker": ticker,
-                "position_pct": round(d["position_pct"], 1),
+                "position_pct": d["position_pct"],
                 "position_size": d["position_size"],
                 "current_price": d["current_price"],
                 "avg_price": d["avg_price"],
@@ -437,6 +489,7 @@ class StockRiskAgent:
                 "action": action["action"],
                 "trim_pct": action["trim_pct"],
                 "action_reason": action["reason"],
+                "data_quality_issues": quality_issues,
                 "scores": scores,
                 "composite": composite,
             }
@@ -447,6 +500,8 @@ class StockRiskAgent:
                 {
                     "ticker": ticker,
                     "current_price": d["current_price"],
+                    "currency": "USD",
+                    "price_source": d.get("price_source", "quote"),
                     "position_pct": round(d["position_pct"], 1),
                     "news": d["news"],
                     "pe_ratio": d["pe_ratio"],
@@ -488,12 +543,15 @@ class StockRiskAgent:
 
         portfolio_summary = {
             "data_source": data_source,
+            "currency": "USD",
             "total_value": round(total_value, 2),
             "portfolio_composite_score": portfolio_composite,
             "portfolio_rating": rf._rating(portfolio_composite),
             "portfolio_red_alert": portfolio_red_alert,
             "sector_hhi": sector_hhi,
             "portfolio_level_metrics": portfolio_level,
+            "portfolio_return_coverage": return_coverage,
+            "data_complete": all(s["composite"]["data_complete"] for s in all_scores),
             "stocks": all_scores,
         }
         if skipped_tickers:
@@ -540,6 +598,8 @@ class StockRiskAgent:
             "magenta",
         )
         try:
+            if self.client is None:
+                self.setup_ai()
             message = _retry(
                 lambda: self.client.messages.create(
                     model=config.MODEL_NAME,
@@ -560,39 +620,70 @@ class StockRiskAgent:
                 (block.text for block in message.content if block.type == "text"),
                 None,
             )
-            if analysis is None:
-                cprint("❌ Claude response contained no text block", "red")
-                return
+            if not analysis or not analysis.strip() or getattr(message, "stop_reason", None) == "max_tokens":
+                raise AnalysisError("Claude returned an empty or truncated analysis")
 
             # Log token usage
             self.log_token_usage(message.usage)
 
-            # Send Report
-            self.send_report(analysis, portfolio_summary)
-
         except Exception as e:
             cprint(f"❌ AI Analysis Error: {e}", "red")
+            self.send_report(self.deterministic_report(portfolio_summary), portfolio_summary)
+            raise AnalysisError("AI interpretation failed; quantitative fallback report delivered", report_sent=True) from e
+
+        self.send_report(analysis, portfolio_summary)
+        return portfolio_summary
+
+    def deterministic_report(self, summary):
+        """A usable numerical briefing when the AI service is unavailable."""
+        lines = ["AI INTERPRETATION UNAVAILABLE", "Quantitative candidates only; review the evidence before acting.",
+                 "OVERVIEW", f"USD stock value: ${summary['total_value']:,.2f}. Portfolio score: {summary['portfolio_composite_score']}/100."]
+        for stock in summary["stocks"]:
+            lines.extend([f"{stock['ticker']} - {stock['composite']['composite_score']}/100",
+                          f"Weight {stock['position_pct']:.1f}%. {actions.action_label(stock['action'], stock['trim_pct'], stock['position_size'])}. {stock['action_reason']}"])
+        return "\n".join(lines)
+
+    def report_notices(self, summary):
+        """Deterministic alerts shared by HTML, plain email and Telegram."""
+        if not summary:
+            return ""
+        lines = []
+        if summary.get("portfolio_red_alert"):
+            affected = [s["ticker"] for s in summary["stocks"] if s["composite"]["red_alert"] and s["position_pct"] >= config.ALERT_MIN_POSITION_PCT]
+            lines.append(f"RISK ALERT\nPortfolio score {summary['portfolio_composite_score']}/100; significant stock alerts: {', '.join(affected) or 'none'}. Review flagged positions before deciding to keep or trim.")
+        if summary.get("data_source") == "csv_fallback":
+            lines.append("POSITION DATA WARNING\nBroker sync failed. Verify holdings against the saved snapshot before acting.")
+        for stock in summary.get("stocks", []):
+            if stock.get("data_quality_issues"):
+                lines.append(f"DATA QUALITY: {stock['ticker']}: " + "; ".join(stock["data_quality_issues"]))
+            if stock["composite"].get("critical_alert"):
+                critical = [name for name, value in stock["scores"].items() if value["score"] > 80]
+                values = [f"{name} {stock['scores'][name]['score']}/100" for name in critical]
+                lines.append(f"CRITICAL CATEGORY: {stock['ticker']}: {', '.join(values)}. Composite colour does not override this alert.")
+        return "\n\n".join(lines)
 
     def send_report(self, report, portfolio_summary=None):
         """Route report to configured notification method(s)"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         footer = f"\n\n🕒 {timestamp}"
-        full_message = report + footer
+        notices = self.report_notices(portfolio_summary)
+        full_message = (notices + "\n\n" if notices else "") + report + footer
 
         method = (config.NOTIFICATION_METHOD or "email").lower()
 
-        if method == "email":
-            self.send_email(full_message, portfolio_summary)
-        elif method == "telegram":
-            self.send_telegram(full_message)
-        elif method == "both":
-            self.send_email(full_message, portfolio_summary)
-            self.send_telegram(full_message)
-        else:
-            cprint(
-                f"⚠️ Unknown NOTIFICATION_METHOD '{method}', printing report:", "yellow"
-            )
-            print(full_message)
+        if method not in ("email", "telegram", "both"):
+            raise ReportDeliveryError(f"Unknown NOTIFICATION_METHOD {method!r}")
+        failures = []
+        for channel in (("email", "telegram") if method == "both" else (method,)):
+            try:
+                if channel == "email":
+                    self.send_email(full_message, portfolio_summary)
+                else:
+                    self.send_telegram(full_message)
+            except Exception as e:
+                failures.append(f"{channel}: {e}")
+        if failures:
+            raise ReportDeliveryError("Report delivery failed: " + "; ".join(failures))
 
     def format_html_report(self, plain_text, portfolio_summary=None):
         """Convert plain-text report to styled HTML email."""
@@ -647,16 +738,22 @@ class StockRiskAgent:
 
         # Build risk summary table if portfolio_summary is available
         risk_table = ""
-        if portfolio_summary and "stocks" in portfolio_summary:
+        if portfolio_summary and portfolio_summary.get("stocks"):
             composite = portfolio_summary.get("portfolio_composite_score", 0)
             rating = portfolio_summary.get("portfolio_rating", "green")
             badge_color = RATING_COLORS.get(rating, MUTED_COLOR)
+            composite_label = "Portfolio Composite"
+            if portfolio_summary.get("data_complete") is False:
+                badge_color = MUTED_COLOR
+                composite_label += " (provisional)"
 
             rows = ""
             for stock in portfolio_summary["stocks"]:
                 s_rating = stock["composite"]["rating"]
                 s_color = RATING_COLORS.get(s_rating, MUTED_COLOR)
                 s_score = stock["composite"]["composite_score"]
+                if not stock["composite"].get("data_complete", True):
+                    s_color = MUTED_COLOR
 
                 avg = stock.get("avg_price")
                 has_avg = (
@@ -687,11 +784,11 @@ class StockRiskAgent:
 
                 rows += f"""
                 <tr>
-                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; font-weight: bold;">{stock["ticker"]}</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; font-weight: bold;">{html_mod.escape(stock["ticker"])}</td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: center;">
                         <span style="background: {s_color}; color: white; padding: 2px 10px; border-radius: 12px; font-size: 13px;">{s_score}/100</span>
                     </td>
-                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{stock["position_pct"]}%</td>
+                    <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{stock["position_pct"]:.1f}%</td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{entry_cell}</td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: right;">{pnl_cell}</td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #eee; text-align: center;">{act_cell}</td>
@@ -700,7 +797,7 @@ class StockRiskAgent:
             risk_table = f"""
             <div style="margin: 20px 0;">
                 <div style="text-align: center; margin-bottom: 16px;">
-                    <span style="font-size: 14px; color: #666;">Portfolio Composite</span><br>
+                    <span style="font-size: 14px; color: #666;">{composite_label}</span><br>
                     <span style="background: {badge_color}; color: white; padding: 6px 20px; border-radius: 16px; font-size: 20px; font-weight: bold; display: inline-block; margin-top: 8px;">{composite}/100</span>
                 </div>
                 <table style="width: 100%; border-collapse: collapse; font-family: monospace;">
@@ -710,7 +807,7 @@ class StockRiskAgent:
                         <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">Weight</th>
                         <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">Entry</th>
                         <th style="padding: 8px 12px; text-align: right; border-bottom: 2px solid #ddd;">P&amp;L</th>
-                        <th style="padding: 8px 12px; text-align: center; border-bottom: 2px solid #ddd;">Action</th>
+                        <th style="padding: 8px 12px; text-align: center; border-bottom: 2px solid #ddd;">Candidate</th>
                     </tr>
                     {rows}
                 </table>
@@ -742,18 +839,24 @@ class StockRiskAgent:
         email_to = config.EMAIL_TO
 
         if not smtp_user or not smtp_password or not email_to:
-            cprint("⚠️ Email not configured, printing report:", "yellow")
-            print(message)
-            return
+            raise ReportDeliveryError("Email is not configured")
 
         try:
             msg = MIMEMultipart("alternative")
             msg["From"] = config.EMAIL_FROM or smtp_user
-            recipients = [addr.strip() for addr in email_to.split(",")]
+            recipients = [addr.strip() for addr in email_to.split(",") if addr.strip()]
+            if not recipients:
+                raise ReportDeliveryError("No email recipients configured")
             msg["To"] = ", ".join(recipients)
             subject = f"Proteus Risk Report - {datetime.now().strftime('%Y-%m-%d')}"
             if portfolio_summary and portfolio_summary.get("data_source") == "csv_fallback":
                 subject = "[CSV FALLBACK] " + subject
+            if portfolio_summary and portfolio_summary.get("portfolio_red_alert"):
+                subject = "[RISK ALERT] " + subject
+            if portfolio_summary and portfolio_summary.get("data_complete") is False:
+                subject = "[INCOMPLETE DATA] " + subject
+            if portfolio_summary is None:
+                subject = "[ANALYSIS FAILED] " + subject
             msg["Subject"] = subject
 
             # Plain-text fallback
@@ -763,14 +866,17 @@ class StockRiskAgent:
             html_body = self.format_html_report(message, portfolio_summary)
             msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-            with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT) as server:
+            with smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=30) as server:
                 server.starttls()
                 server.login(smtp_user, smtp_password)
-                server.sendmail(msg["From"], recipients, msg.as_string())
+                refused = server.sendmail(msg["From"], recipients, msg.as_string())
+                if refused:
+                    raise ReportDeliveryError("Email refused for one or more recipients")
 
             cprint("✅ Email Report Sent!", "green")
         except Exception as e:
             cprint(f"❌ Email Send Error: {e}", "red")
+            raise
 
     def send_telegram(self, message):
         """Send report via Telegram"""
@@ -778,11 +884,10 @@ class StockRiskAgent:
         chat_id = config.TELEGRAM_CHAT_ID
 
         if not bot_token or not chat_id:
-            cprint("⚠️ Telegram not configured, printing report:", "yellow")
-            print(message)
-            return
+            raise ReportDeliveryError("Telegram is not configured")
 
         async def _send(content):
+            content = content.lstrip()
             bot = Bot(token=bot_token)
             try:
                 max_length = 4000
@@ -795,7 +900,7 @@ class StockRiskAgent:
                     split_idx = content.rfind("\n\n", 0, max_length)
                     if split_idx == -1:
                         split_idx = content.rfind("\n", 0, max_length)
-                    if split_idx == -1:
+                    if split_idx <= 0:
                         split_idx = max_length
 
                     parts.append(content[:split_idx])
@@ -807,11 +912,13 @@ class StockRiskAgent:
                 cprint("✅ Telegram Report Sent!", "green")
             except Exception as e:
                 cprint(f"❌ Telegram Send Error: {e}", "red")
+                raise
 
         try:
             asyncio.run(_send(message))
         except Exception as e:
             cprint(f"❌ Telegram Async Error: {e}", "red")
+            raise
 
     def job(self, reraise=False):
         """Job to run on schedule"""
@@ -823,6 +930,11 @@ class StockRiskAgent:
             # the one-shot systemd path passes reraise=True so a failed run
             # exits nonzero and the unit is marked failed instead of green
             cprint(f"❌ Analysis run failed: {e}", "red")
+            if not isinstance(e, ReportDeliveryError) and not getattr(e, "report_sent", False):
+                try:
+                    self.send_report(f"ANALYSIS UNAVAILABLE\n{e}\nNo reliable portfolio score or keep/trim recommendation was produced. Check the data and rerun.")
+                except Exception as delivery_error:
+                    cprint(f"❌ Failure notice could not be delivered: {delivery_error}", "red")
             if reraise:
                 raise
 

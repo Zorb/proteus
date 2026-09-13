@@ -372,3 +372,81 @@ class TestPortfolioRedAlert:
     def test_custom_threshold(self):
         scores = [self._stock(3.0, True)]
         assert rf.portfolio_red_alert(scores, 30, min_position_pct=2.0) is True
+
+
+def test_missing_drawdown_is_unknown_not_safe():
+    result = rf.score_drawdown_profile(None, None, None)
+    assert result["score"] == 50
+    assert result["details"]["data_available"] is False
+    assert result["details"]["max_dd_1y"] is None
+
+
+def test_missing_window_does_not_hide_observed_crash():
+    result = rf.score_drawdown_profile(_hist([100.] * 30 + [40.] * 30), None, None)
+    assert result["score"] >= 80
+    assert result["details"]["data_complete"] is False
+
+
+def test_nonoverlapping_correlation_is_not_a_false_red_alert():
+    rng = np.random.default_rng(4)
+    a = pd.Series(rng.normal(0, .01, 100), index=pd.bdate_range("2024-01-01", periods=100))
+    b = pd.Series(rng.normal(0, .01, 100), index=pd.bdate_range("2025-01-01", periods=100))
+    result = rf.score_correlation_risk(a, None, b, None, {})
+    assert result["score"] < 65
+    assert result["details"]["data_complete"] is False
+    assert np.isfinite(result["details"]["down_market_correlation"])
+
+
+def test_first_return_loss_is_included_in_portfolio_drawdown():
+    result = rf.score_portfolio_level(pd.Series([-.5] + [0.] * 30), None)
+    assert result["max_drawdown_1y_pct"] == 50
+
+
+def test_missing_date_with_crash_makes_portfolio_metric_unavailable():
+    a = _hist([100.] * 10 + [50.] * 21)
+    b = _hist([100.] * 31).drop(a.index[10])
+    frame, returns, coverage = rf.build_portfolio_returns({"A": a, "B": b}, {"A": .5, "B": .5})
+    assert frame is None and returns is None
+    assert coverage["missing_observations"] == {"B": 1}
+    assert coverage["data_available"] is False
+
+
+def test_complete_calendar_preserves_loss_and_weights():
+    a = _hist([100.] * 10 + [50.] * 21)
+    b = _hist([100.] * 31)
+    frame, returns, coverage = rf.build_portfolio_returns({"A": a, "B": b}, {"A": .7, "B": .3})
+    assert returns.iloc[9] == pytest.approx(-.35)
+    assert rf.score_portfolio_level(returns, None)["max_drawdown_1y_pct"] == 35
+    assert coverage["observations"] == 30
+
+
+def test_missing_history_does_not_renormalize_other_stock():
+    _, returns, coverage = rf.build_portfolio_returns({"A": _hist([100.] * 50), "B": None}, {"A": .7, "B": .3})
+    assert returns is None
+    assert coverage["missing_history_tickers"] == ["B"]
+
+
+def test_benchmark_date_missing_from_every_stock_is_detected():
+    hist = _hist([100.] * 50)
+    spy = hist["Close"].pct_change().dropna()
+    hist = hist.drop(hist.index[20])
+    _, returns, coverage = rf.build_portfolio_returns({"A": hist}, {"A": 1.}, spy)
+    assert returns is None
+    assert coverage["missing_observations"] == {"A": 1}
+
+
+def test_red_threshold_is_consistent_at_65():
+    result = rf.calculate_composite({cat: {"score": 65} for cat in rf.WEIGHTS})
+    assert result["rating"] == "red"
+    assert result["red_alert"] is True
+    assert rf.portfolio_red_alert([], 65) is True
+
+
+def test_composite_exposes_missing_evidence_and_critical_category():
+    scores = {cat: {"score": 10} for cat in rf.WEIGHTS}
+    scores["balance_sheet"] = {"score": 100}
+    scores["drawdown_profile"] = rf.score_drawdown_profile(None, None, None)
+    result = rf.calculate_composite(scores)
+    assert result["critical_alert"] is True
+    assert result["data_complete"] is False
+    assert result["incomplete_categories"] == ["drawdown_profile"]
