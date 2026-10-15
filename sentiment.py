@@ -1,168 +1,102 @@
 """
 sentiment.py — Alternative data sources for Proteus.
 
-Fetches news sentiment (Alpha Vantage) for portfolio tickers.
+Fetches recent news headlines (Yahoo Finance RSS, no API key) for portfolio tickers.
 """
 
-import json
-import urllib.request
 import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from termcolor import cprint
 
 
-ALPHAVANTAGE_BASE = "https://www.alphavantage.co/query"
+YAHOO_RSS = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
+NEWS_DAYS = 14  # small caps can go a week or more without a headline
+NEWS_PER_TICKER = 8  # the feed includes articles that only mention the ticker
 
 
 # ---------------------------------------------------------------------------
-# Alpha Vantage — News Sentiment
+# Yahoo Finance — News Headlines
 # ---------------------------------------------------------------------------
 
 
-def fetch_news_sentiment(tickers, api_key):
+def fetch_news(tickers):
     """
-    Fetch AI-scored news sentiment for a list of tickers via Alpha Vantage.
+    Fetch recent headlines for each ticker from Yahoo Finance's RSS feed.
 
-    Uses a single batched API call (1 request for all tickers).
+    Free and keyless; one request per ticker. (yfinance's .news is dead:
+    Yahoo answers its endpoint with a 404 and yfinance returns [] silently.)
 
     Args:
-        tickers: list of stock ticker strings (e.g. ["AAPL", "AMD"])
-        api_key: Alpha Vantage API key (free tier: 25 requests/day)
+        tickers: list of Yahoo Finance ticker strings (e.g. ["AAPL", "LGEN.L"])
 
     Returns:
-        dict mapping ticker -> sentiment dict or None, e.g.:
+        dict mapping ticker -> headlines from the last NEWS_DAYS days, newest
+        first, or None if the fetch failed, e.g.:
         {
-            "AAPL": {
-                "article_count": 12,
-                "avg_score": 0.15,
-                "label_distribution": {"Bullish": 3, "Somewhat-Bullish": 5, ...},
-                "top_articles": [{"title": "...", "score": 0.28, "label": "Bullish"}],
-            },
-            "AMD": None,  # no articles found
+            "AAPL": [{"date": "2026-10-15", "title": "..."}],
+            "AMD": [],       # no recent headlines
+            "LGEN.L": None,  # request or parse failed
         }
     """
-    if not api_key:
-        cprint("  ⚠️ ALPHAVANTAGE_API_KEY not set, skipping news sentiment", "yellow")
-        return {t: None for t in tickers}
-
-    # Strip Yahoo Finance suffixes for the API call (e.g. LGEN.L → LGEN)
-    clean_tickers = [t.split(".")[0] for t in tickers]
-    ticker_map = dict(zip(clean_tickers, tickers))  # clean → original
-
-    # Single batched request for all tickers
-    params = urllib.parse.urlencode(
-        {
-            "function": "NEWS_SENTIMENT",
-            "tickers": ",".join(clean_tickers),
-            "sort": "RELEVANCE",
-            "limit": 50,
-            "apikey": api_key,
-        }
-    )
-    url = f"{ALPHAVANTAGE_BASE}?{params}"
-
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception as e:
-        cprint(f"  ⚠️ Alpha Vantage request failed: {e}", "yellow")
-        return {t: None for t in tickers}
-
-    if "feed" not in data:
-        error_msg = data.get("Note") or data.get("Information") or "Unknown error"
-        cprint(f"  ⚠️ Alpha Vantage API error: {error_msg}", "yellow")
-        return {t: None for t in tickers}
-
-    # Group articles by ticker
-    ticker_data = {t: {"scores": [], "labels": [], "articles": []} for t in clean_tickers}
-
-    for article in data["feed"]:
-        for ts in article.get("ticker_sentiment", []):
-            tick = ts.get("ticker", "")
-            if tick not in ticker_data:
-                continue
-
-            score = float(ts.get("ticker_sentiment_score", 0))
-            label = ts.get("ticker_sentiment_label", "Neutral")
-            relevance = float(ts.get("relevance_score", 0))
-
-            ticker_data[tick]["scores"].append(score)
-            ticker_data[tick]["labels"].append(label)
-            ticker_data[tick]["articles"].append(
-                {
-                    "title": article.get("title", "Untitled"),
-                    "score": score,
-                    "label": label,
-                    "relevance": relevance,
-                }
-            )
-
-    # Build results keyed by original ticker names
+    cutoff = datetime.now(timezone.utc) - timedelta(days=NEWS_DAYS)
     results = {}
-    for clean, original in ticker_map.items():
-        td = ticker_data.get(clean)
-        if not td or not td["scores"]:
-            results[original] = None
+
+    for ticker in tickers:
+        url = YAHOO_RSS.format(ticker=urllib.parse.quote(ticker))
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                root = ET.fromstring(resp.read())
+        except Exception as e:
+            cprint(f"  ⚠️ News fetch failed for {ticker}: {e}", "yellow")
+            results[ticker] = None
             continue
 
-        # Label distribution
-        label_dist = {}
-        for lbl in td["labels"]:
-            label_dist[lbl] = label_dist.get(lbl, 0) + 1
+        headlines = []
+        for item in root.findall("./channel/item"):
+            title = (item.findtext("title") or "").strip()
+            try:
+                published = parsedate_to_datetime(item.findtext("pubDate"))
+            except (TypeError, ValueError):
+                continue  # missing or malformed date
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=timezone.utc)
+            if title and published >= cutoff:
+                headlines.append((published, title))
 
-        # Top 3 articles by relevance
-        top = sorted(td["articles"], key=lambda a: a["relevance"], reverse=True)[:3]
-
-        results[original] = {
-            "article_count": len(td["scores"]),
-            "avg_score": round(sum(td["scores"]) / len(td["scores"]), 4),
-            "label_distribution": label_dist,
-            "top_articles": [
-                {"title": a["title"], "score": a["score"], "label": a["label"]}
-                for a in top
-            ],
-        }
+        headlines.sort(reverse=True)
+        results[ticker] = [
+            {"date": published.strftime("%Y-%m-%d"), "title": title}
+            for published, title in headlines[:NEWS_PER_TICKER]
+        ]
 
     return results
 
 
-def format_news_sentiment(results):
+def format_news(results):
     """
-    Format Alpha Vantage news sentiment into a readable string for the Claude prompt.
+    Format headlines into a readable string for the Claude prompt.
 
     Args:
-        results: dict from fetch_news_sentiment()
+        results: dict from fetch_news()
 
     Returns:
-        str — formatted summary, or fallback message if empty
+        str — per-ticker headline list, or fallback message if no ticker has any
     """
+    if not any(results.values()):
+        return "No news headlines available for portfolio tickers."
+
     lines = []
-    has_data = False
-
-    for ticker, data in results.items():
-        if data is None:
-            lines.append(f"  {ticker}: No news sentiment data available")
-            continue
-
-        has_data = True
-        avg = data["avg_score"]
-        count = data["article_count"]
-
-        # Determine dominant label
-        dist = data["label_distribution"]
-        dominant = max(dist, key=dist.get) if dist else "Neutral"
-
-        lines.append(f"  {ticker}: {avg:+.3f} avg score | {count} articles | {dominant}")
-        for art in data["top_articles"]:
-            lines.append(f"    - [{art['label']}] {art['title']}")
-
-    if not has_data:
-        return "No news sentiment data available for portfolio tickers."
+    for ticker, headlines in results.items():
+        if headlines is None:
+            lines.append(f"  {ticker}: Headlines unavailable (fetch failed)")
+        elif not headlines:
+            lines.append(f"  {ticker}: No headlines in the last {NEWS_DAYS} days")
+        else:
+            lines.append(f"  {ticker}:")
+            lines.extend(f"    - {h['date']} {h['title']}" for h in headlines)
 
     return "\n".join(lines)

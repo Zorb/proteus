@@ -1,6 +1,6 @@
 # Proteus
 
-AI-powered stock portfolio risk monitor. Runs on a schedule, scores your holdings across 7 risk categories, suggests partial take-profit/cut-loss actions from your entry prices, enriches with news sentiment, and delivers a plain-language briefing via email or Telegram.
+AI-powered stock portfolio risk monitor. Runs on a schedule, scores your holdings across 7 risk categories, suggests partial take-profit/cut-loss actions from your entry prices, enriches with recent news headlines, and delivers a plain-language briefing via email or Telegram.
 
 Configured for a **long-only UK ISA holding USD-denominated stocks**. Values and weights cover the stock holdings, excluding cash. Unexpected currencies and short positions are rejected; legacy CSVs without a `Currency` column are interpreted as USD. This is a decision aid for which holdings to keep, review, or trim; the risk score is a historical heuristic, not a forecast of returns.
 
@@ -9,7 +9,7 @@ Configured for a **long-only UK ISA holding USD-denominated stocks**. Values and
 1. Loads your portfolio from Interactive Brokers (or a CSV fallback)
 2. Fetches price history, fundamentals, and news from Yahoo Finance
 3. Scores each stock 0-100 across 7 risk categories (drawdown, volatility, liquidity, balance sheet, correlation, concentration, regime sensitivity)
-4. Computes partial take-profit / cut-loss suggestions from entry price and pulls Alpha Vantage news sentiment
+4. Computes partial take-profit / cut-loss suggestions from entry price
 5. Sends everything to Claude (Opus 4.6 + extended thinking) for interpretation
 6. Delivers a concise report via email, Telegram, or both
 
@@ -35,9 +35,6 @@ EMAIL_TO=you@gmail.com
 # Optional: Telegram (set NOTIFICATION_METHOD=telegram or both)
 TELEGRAM_BOT_TOKEN=your_token
 TELEGRAM_CHAT_ID=your_chat_id
-
-# Optional: Alpha Vantage news sentiment (free key, 25 req/day)
-ALPHAVANTAGE_API_KEY=your_key
 
 # Optional: Interactive Brokers portfolio sync
 IBKR_FLEX_TOKEN=your_token
@@ -111,6 +108,5 @@ Suggestions are candidates, not orders; Claude addresses each one in the report.
 
 ## Data sources
 
-- **Yahoo Finance** — price history, fundamentals, news
-- **Alpha Vantage** — AI-scored news sentiment from 50+ outlets (free API key)
+- **Yahoo Finance** — price history, fundamentals, news headlines (RSS feed, no key)
 - **Interactive Brokers** — live portfolio positions via Flex Query (optional)

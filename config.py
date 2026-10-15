@@ -31,9 +31,6 @@ MODEL_NAME = "claude-opus-4-6"
 IBKR_FLEX_TOKEN = os.getenv("IBKR_FLEX_TOKEN")
 IBKR_FLEX_QUERY_ID = os.getenv("IBKR_FLEX_QUERY_ID")
 
-# Alpha Vantage Configuration (news sentiment)
-ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
-
 # Alert Configuration
 # Positions below this % of the portfolio can't trigger a portfolio-wide red alert
 ALERT_MIN_POSITION_PCT = float(os.getenv("ALERT_MIN_POSITION_PCT", "5"))
@@ -56,7 +53,7 @@ SCHEDULE_TIME = os.getenv("SCHEDULE_TIME", "08:00")  # Time to run daily analysi
 
 # Risk Analysis Prompt
 RISK_PROMPT = """
-You are a financial analyst helping decide which stocks to keep and which to trim in a long-only UK ISA holding USD-denominated stocks. This is a snapshot of the stock holdings, excluding cash; all valuations are USD. You are given pre-calculated historical risk scores, market data with entry prices and unrealized P&L, deterministic take-profit/cut-loss candidates, and news sentiment. No previous-run comparison or investment-thesis history is supplied: do not claim changes since a prior report or invent evidence about a growth thesis.
+You are a financial analyst helping decide which stocks to keep and which to trim in a long-only UK ISA holding USD-denominated stocks. This is a snapshot of the stock holdings, excluding cash; all valuations are USD. You are given pre-calculated historical risk scores, market data with entry prices and unrealized P&L, deterministic take-profit/cut-loss candidates, and recent news headlines. No previous-run comparison or investment-thesis history is supplied: do not claim changes since a prior report or invent evidence about a growth thesis.
 
 QUANTITATIVE RISK SCORES:
 {scores}
@@ -67,8 +64,8 @@ RAW MARKET DATA:
 BENCHMARK DATA:
 {benchmark_data}
 
-NEWS SENTIMENT DATA (Alpha Vantage):
-{news_sentiment_data}
+RECENT NEWS HEADLINES (Yahoo Finance):
+{news_data}
 
 SCORING REFERENCE:
 - Each category is scored 0-100 (0 = safe, 100 = maximum risk)
@@ -80,7 +77,7 @@ SCORING REFERENCE:
 - A critical_alert takes precedence over a green composite; do not call such a position safe. Incomplete data disables green softening. An action of review means the evidence needs attention; hold means no P&L ladder was triggered, not an endorsement of the investment thesis. Make uncertainty explicit, and distinguish any proposed amendment from the deterministic candidate in the table.
 - data_complete false and data_quality_issues identify provisional evidence. Missing history is unknown risk, not zero risk. If portfolio_return_coverage.data_available is false, aggregated portfolio metrics are unavailable; do not infer diversification or a zero drawdown. Use actual observation counts and dates, not an assumed full-year history.
 - data_source "csv_fallback" means the live IBKR sync failed and positions come from the last saved snapshot — open the OVERVIEW by saying the position data may be stale.
-- Alpha Vantage sentiment ranges from -0.35 (bearish) to +0.35 (bullish).
+- News headlines are unscored: judge their tone yourself and cite the headline and its date. Ignore headlines about other companies. No recent headlines means no news, not good news.
 - If data is missing for a source, skip it. Do not fabricate.
 
 WRITING RULES:
@@ -103,7 +100,7 @@ OVERVIEW
 Portfolio risk score: [X]/100 ([rating]). Total value: $[X]. VIX is at [X] and the 10Y yield is [X]%. Biggest concern across the portfolio: [category] averaging [X]/100.
 
 [TICKER] - [score]/100
-[2-3 plain sentences. What is happening with this stock right now? Cite the price, the unrealized P&L from entry, the worst risk category and its score, any notable P/E or drawdown numbers, and sentiment if available. If the stock is a take_profit_candidate or cut_loss_candidate, address the suggested trim explicitly — endorse it or argue against it with a number. Keep it natural.]
+[2-3 plain sentences. What is happening with this stock right now? Cite the price, the unrealized P&L from entry, the worst risk category and its score, any notable P/E or drawdown numbers, and any material recent headline. If the stock is a take_profit_candidate or cut_loss_candidate, address the suggested trim explicitly — endorse it or argue against it with a number. Keep it natural.]
 
 [TICKER] - [score]/100
 [Same format, repeat for each stock.]

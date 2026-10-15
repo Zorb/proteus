@@ -17,7 +17,7 @@ def agent_modules(monkeypatch):
     config = types.ModuleType("config")
     values = {
         "IBKR_FLEX_TOKEN": "", "IBKR_FLEX_QUERY_ID": "", "ANTHROPIC_KEY": "",
-        "ALPHAVANTAGE_API_KEY": "", "MODEL_NAME": "offline-test",
+        "MODEL_NAME": "offline-test",
         "ACTION_TP_LADDER": [(25., 25.), (50., 50.)],
         "ACTION_CL_LADDER": [(-8., 50.), (-15., 100.)],
         "ACTION_RED_TP_CAP": 75., "ACTION_RED_CL_CAP": 100.,
@@ -52,7 +52,7 @@ def agent_modules(monkeypatch):
 
     monkeypatch.setattr(sync.urllib.request, "urlopen", no_network)
     monkeypatch.setattr(main.smtplib, "SMTP", no_network)
-    monkeypatch.setattr(sentiment, "fetch_news_sentiment", lambda tickers, key: {t: None for t in tickers})
+    monkeypatch.setattr(sentiment, "fetch_news", lambda tickers: {t: [] for t in tickers})
     return types.SimpleNamespace(main=main, sync=sync, config=config)
 
 
@@ -82,7 +82,7 @@ def analysis_case(agent_modules, monkeypatch):
     data = {
         "ticker": "AAA", "currency": "USD", "current_price": 110.,
         "hist_1y": history, "hist_3y": history, "hist_5y": history,
-        "recent_closes": [], "news": [], "pe_ratio": 20., "market_cap": 1_000_000.,
+        "recent_closes": [], "pe_ratio": 20., "market_cap": 1_000_000.,
         "bid": 109.99, "ask": 110.01, "avg_volume": 1_000_000., "sector": "Technology",
         "balance_sheet": pd.DataFrame({"latest": [100., 500., 100.]}, index=["Total Debt", "Current Assets", "Current Liabilities"]),
         "income_stmt": pd.DataFrame({"latest": [1000., 10.]}, index=["EBITDA", "Interest Expense"]),

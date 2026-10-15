@@ -233,7 +233,7 @@ def test_price_selection_uses_valid_quote_then_recent_close(agent_modules, monke
     main = agent_modules.main
     end = pd.offsets.BDay().rollback(history_clock.tz_localize(None).normalize())
     history = pd.DataFrame({"Close": [100., 101.], "Volume": [10., 10.]}, index=pd.bdate_range(end=end, periods=2))
-    ticker = types.SimpleNamespace(ticker="AAA", history=lambda **kw: history, news=[],
+    ticker = types.SimpleNamespace(ticker="AAA", history=lambda **kw: history,
                                    info={"currency": "USD", "currentPrice": None, "regularMarketPrice": 105.},
                                    balance_sheet=pd.DataFrame(), income_stmt=pd.DataFrame())
     monkeypatch.setattr(main.yf, "Ticker", lambda *a: ticker, raising=False)

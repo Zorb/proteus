@@ -183,17 +183,6 @@ class StockRiskAgent:
                 for d, c in hist_1y["Close"].tail(5).items()
             ]
 
-            # News (yfinance .news can raise on some tickers)
-            try:
-                news = stock.news[:3] if stock.news else []
-            except Exception:
-                news = []
-            news_summary = []
-            for n in news:
-                if isinstance(n, dict):
-                    title = n.get("title", n.get("headline", "No title"))
-                    news_summary.append(title)
-
             # Key info
             info = stock.info
             currency = info.get("currency")
@@ -235,7 +224,6 @@ class StockRiskAgent:
                 "hist_1y": hist_1y,
                 "hist_3y": hist_3y,
                 "hist_5y": hist_5y,
-                "news": news_summary,
                 "pe_ratio": info.get("trailingPE"),
                 "market_cap": info.get("marketCap"),
                 "bid": info.get("bid"),
@@ -503,7 +491,6 @@ class StockRiskAgent:
                     "currency": "USD",
                     "price_source": d.get("price_source", "quote"),
                     "position_pct": round(d["position_pct"], 1),
-                    "news": d["news"],
                     "pe_ratio": d["pe_ratio"],
                     "market_cap": d["market_cap"],
                     "sector": d.get("sector"),
@@ -559,17 +546,19 @@ class StockRiskAgent:
 
         tickers = [d["ticker"] for d in portfolio_data]
 
-        # Fetch Alpha Vantage news sentiment
-        cprint("📰 Fetching news sentiment...", "cyan")
+        # Fetch recent news headlines (Yahoo Finance RSS)
+        cprint("📰 Fetching news headlines...", "cyan")
         try:
-            news_results = sentiment.fetch_news_sentiment(
-                tickers, config.ALPHAVANTAGE_API_KEY
-            )
-            news_str = sentiment.format_news_sentiment(news_results)
-            cprint("✅ News sentiment loaded", "green")
+            news_results = sentiment.fetch_news(tickers)
+            news_str = sentiment.format_news(news_results)
+            with_news = sum(1 for headlines in news_results.values() if headlines)
+            if with_news:
+                cprint(f"✅ News headlines loaded for {with_news}/{len(tickers)} tickers", "green")
+            else:
+                cprint("  ⚠️ No news headlines for any ticker", "yellow")
         except Exception as e:
-            cprint(f"  ⚠️ News sentiment fetch failed: {e}", "yellow")
-            news_str = "News sentiment data unavailable."
+            cprint(f"  ⚠️ News headlines fetch failed: {e}", "yellow")
+            news_str = "News headlines unavailable."
 
         # Build benchmark summary for Claude
         vix_current = (
@@ -588,7 +577,7 @@ class StockRiskAgent:
         prompt = config.RISK_PROMPT.format(
             scores=json.dumps(portfolio_summary, default=_json_default, indent=1),
             data=json.dumps(display_data, default=_json_default, indent=1),
-            news_sentiment_data=news_str,
+            news_data=news_str,
             benchmark_data=benchmark_str,
         )
 
