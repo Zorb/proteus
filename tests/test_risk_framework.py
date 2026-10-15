@@ -195,6 +195,17 @@ class TestBalanceSheet:
         result = rf.score_balance_sheet(balance, income)
         assert result["score"] >= 65
 
+    @pytest.mark.parametrize("total_debt, lease_only", [(1_800_000, True), (5_000_000, False)])
+    def test_missing_interest_line_is_not_applicable_only_for_lease_only_debt(self, total_debt, lease_only):
+        balance = pd.DataFrame(
+            {"2025": [total_debt, 1_800_000, 5_000_000, 2_000_000]},
+            index=["Total Debt", "Capital Lease Obligations", "Current Assets", "Current Liabilities"],
+        )
+        income = pd.DataFrame({"2025": [2_700_000]}, index=["EBITDA"])
+        details = rf.score_balance_sheet(balance, income)["details"]
+        assert details["interest_coverage_not_applicable"] is lease_only
+        assert details["data_complete"] is lease_only
+
 
 class TestConcentrationRisk:
     def test_small_safe_position_scores_low(self):

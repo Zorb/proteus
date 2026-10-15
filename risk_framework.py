@@ -257,6 +257,7 @@ def score_balance_sheet(balance_sheet_df, income_stmt_df):
     ebitda = _get_latest(income_stmt_df, "EBITDA")
     interest = _get_latest(income_stmt_df, "Interest Expense")
     total_debt = _get_latest(balance_sheet_df, "Total Debt")
+    lease_debt = _get_latest(balance_sheet_df, "Capital Lease Obligations")
     current_assets = _get_latest(balance_sheet_df, "Current Assets")
     current_liab = _get_latest(balance_sheet_df, "Current Liabilities")
 
@@ -302,9 +303,12 @@ def score_balance_sheet(balance_sheet_df, income_stmt_df):
         score = _clamp(round(sum(scores) / len(scores)))
     else:
         score = 50
-    # Known zero interest expense makes coverage inapplicable, not missing.
+    # Known zero interest expense makes coverage inapplicable, not missing. So does
+    # an absent interest line when all reported debt is leases: there are no
+    # borrowings to service, and Yahoo omits the line for such companies.
     # Keep averaging the applicable ratios without inventing an infinite ratio.
-    interest_not_applicable = ebitda is not None and interest == 0
+    lease_only_debt = total_debt is not None and lease_debt is not None and total_debt <= lease_debt
+    interest_not_applicable = ebitda is not None and (interest == 0 or (interest is None and lease_only_debt))
     details["interest_coverage_not_applicable"] = interest_not_applicable
     details["data_complete"] = len(scores) == (2 if interest_not_applicable else 3)
     return {"score": score, "rating": _rating(score), "details": details}
